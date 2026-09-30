@@ -448,32 +448,36 @@ def main():
     if args.apikey is None:
         print("Error: --apikey is required for transcription. Use --list-devices to inspect devices without a key.")
         sys.exit(1)
-    
-    # Check that device ID is valid if provided
+
+    # Resolve the device to an int up front so the same int is used both for
+    # validation and for the actual capture. (args.device arrives as a string
+    # from the CLI; passing the raw string to sd.InputStream yields
+    # "No input device matching '0'".)
+    device_id = None
     if args.device is not None:
         try:
             device_id = int(args.device)
-            devices = sd.query_devices()
-            if device_id >= len(devices):
-                print(f"Error: Device ID {device_id} is out of range. Use --list-devices to see available devices.")
-                return
-            
-            # Additional validation - test if we can actually open the device
-            try:
-                device_params = get_best_device_parameters(device_id)
-                with sd.InputStream(device=device_id, channels=device_params['channels'], samplerate=device_params['sample_rate']):
-                    pass  # Just test opening
-                print(f"Device ID {device_id} is valid and available for streaming")
-            except Exception as e:
-                print(f"Error using device ID {device_id}: Device not accessible - {e}")
-                return
-                
         except ValueError:
             print("Error: Device ID must be an integer")
             return
-    
-    # Run continuous capture
-    continuous_capture(args.apikey, args.device)
+
+        devices = sd.query_devices()
+        if device_id >= len(devices):
+            print(f"Error: Device ID {device_id} is out of range. Use --list-devices to see available devices.")
+            return
+
+        # Additional validation - test if we can actually open the device
+        try:
+            device_params = get_best_device_parameters(device_id)
+            with sd.InputStream(device=device_id, channels=device_params['channels'], samplerate=device_params['sample_rate']):
+                pass  # Just test opening
+            print(f"Device ID {device_id} is valid and available for streaming")
+        except Exception as e:
+            print(f"Error using device ID {device_id}: Device not accessible - {e}")
+            return
+
+    # Run continuous capture (with the int device id, or None for the default)
+    continuous_capture(args.apikey, device_id)
 
 
 if __name__ == "__main__":

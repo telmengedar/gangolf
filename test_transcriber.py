@@ -238,3 +238,40 @@ class TestBug3_SampleRateConsistency(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+class TestDeviceIdIntConversion(unittest.TestCase):
+    """REGRESSION: main() must convert '--device <str>' to int before continuous_capture.
+
+    Before the fix, main() validated the int, then passed args.device (a string)
+    to continuous_capture -> record_audio -> sd.InputStream(device='0') -> 'No
+    input device matching "0"'. This test pins the bug: with --device='0' and
+    a reachable input device, main() must reach continuous_capture with an int.
+    """
+
+    @patch('audio_transcriber.continuous_capture')
+    @patch('audio_transcriber.sd.query_devices')
+    @patch('audio_transcriber.sd.InputStream')
+    @patch('audio_transcriber.get_best_device_parameters')
+    @patch('sys.argv', ['audio_transcriber.py', '--apikey', 'DUMMY', '--device', '0'])
+    def test_main_passes_int_device_to_capture(self, mock_params, mock_stream, mock_qd, mock_cc):
+        import audio_transcriber as at
+        mock_qd.return_value = [
+            {'max_input_channels': 1, 'default_samplerate': 16000.0, 'name': 'x'},
+        ]
+        mock_params.return_value = {'channels': 1, 'sample_rate': 16000}
+        cm = MagicMock()
+        mock_stream.return_value.__enter__ = lambda s: cm
+        mock_stream.return_value.__exit__ = lambda s, *a: False
+
+        try:
+            at.main()
+        except SystemExit as e:
+            self.fail("main() exited (%s) — expected it to start continuous_capture" % e.code)
+
+        self.assertTrue(mock_cc.called, "continuous_capture was not called")
+        args = mock_cc.call_args[0]
+        device_arg = args[-1]
+        self.assertIsInstance(device_arg, int,
+            "expected int device id, got %r (this is the original 'No input device matching' bug)" % (device_arg,))
+        self.assertEqual(device_arg, 0)
