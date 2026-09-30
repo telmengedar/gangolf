@@ -25,6 +25,11 @@ THRESHOLD = 0.01  # Silence threshold for speech detection
 MIN_SILENCE_DURATION = 0.5  # Minimum silence duration before sending
 MAX_RECORDING_TIME = 30  # Maximum recording time in seconds
 
+# Sample rate of the stream most recently opened by record_audio.
+# record_audio sets it right before the stream opens; transcribe_audio uses it
+# so the WAV is written at the rate the audio was actually captured at.
+RECORDED_SAMPLE_RATE = SAMPLE_RATE
+
 def get_best_device_parameters(device_id=None):
     """Get optimal audio parameters based on available devices"""
     try:
@@ -212,12 +217,19 @@ def record_audio(device_id=None):
     
     print("Listening for speech... Speak now (silence will trigger sending)")
     
+    # The stream's sample rate, resolved before the stream opens. Used by the
+    # callback to compute the silence/max-time cutoffs (BUG 5/7 — the stream
+    # may run at a rate different from the global SAMPLE_RATE), and recorded
+    # into RECORDED_SAMPLE_RATE for transcribe_audio (BUG 3).
+    stream_samplerate = SAMPLE_RATE
+    stop_flag = False
+
     def callback(indata, frames, time, status):
-        nonlocal audio_buffer, silence_count, recording_started
-        
+        nonlocal silence_count, recording_started, stop_flag
+
         # Get audio data from microphone
         audio_data = indata[:, 0]
-        
+
         # Check if speech is detected
         if is_speech_detected(audio_data, THRESHOLD):
             # If speech detected, add to buffer
@@ -229,17 +241,18 @@ def record_audio(device_id=None):
         else:
             # If silence detected, increment silence counter
             silence_count += 1
-            
-            # Stop after minimum silence period or max time reached
-            if (silence_count > int(MIN_SILENCE_DURATION * SAMPLE_RATE / CHUNK_SIZE) and 
-                recording_started):
-                print("Silence detected. Sending audio...")
-                return False  # Stop recording
 
-        # Stop after max time 
-        if len(audio_buffer) > MAX_RECORDING_TIME * SAMPLE_RATE / CHUNK_SIZE:
+            # Stop after minimum silence period (BUG 5: use the stream's actual
+            # sample rate for the cutoff, not the global SAMPLE_RATE)
+            silence_cutoff = int(MIN_SILENCE_DURATION * stream_samplerate / CHUNK_SIZE)
+            if silence_count > silence_cutoff and recording_started:
+                print("Silence detected. Sending audio...")
+                stop_flag = True
+
+        # Stop after max time (BUG 7: use the stream's actual sample rate)
+        if len(audio_buffer) > MAX_RECORDING_TIME * stream_samplerate / CHUNK_SIZE:
             print(f"Maximum recording time ({MAX_RECORDING_TIME}s) reached")
-            return False
+            stop_flag = True
 
     try:
         # Get adaptive parameters for this device if specified
@@ -252,19 +265,29 @@ def record_audio(device_id=None):
                 'whisper_sample_rate': 16000,
                 'whisper_channels': 1
             }
-        
+
+        # Resolve the stream sample rate up front so the cutoffs and the WAV
+        # write rate agree with what the stream actually produces (BUG 3).
+        stream_samplerate = device_params['sample_rate']
+        global RECORDED_SAMPLE_RATE
+        RECORDED_SAMPLE_RATE = stream_samplerate
+
         # Start streaming audio capture with adaptive parameters
-        with sd.InputStream(callback=callback, channels=device_params['channels'], samplerate=device_params['sample_rate'], 
+        with sd.InputStream(callback=callback, channels=device_params['channels'], samplerate=device_params['sample_rate'],
                            blocksize=CHUNK_SIZE, device=device_id):
-            
-            # Wait for callback to finish - but we control via the return in callback
-            while True:
-                time.sleep(0.1)
-                
+
+            # BUG 4: sd.InputStream ignores the callback return value, so
+            # `return False` in the callback never stopped the stream and the
+            # old `while True: time.sleep(...)` loop hung forever. Instead the
+            # callback sets stop_flag and we exit this loop (and thus the
+            # `with` block) once it is raised.
+            while not stop_flag:
+                time.sleep(0.05)
+
         # Convert buffer to numpy array and return it
         if len(audio_buffer) > 0:
             audio_array = np.concatenate(audio_buffer)
-            print(f"Recorded {len(audio_array) / SAMPLE_RATE:.2f} seconds of audio")
+            print(f"Recorded {len(audio_array) / stream_samplerate:.2f} seconds of audio")
             return audio_array
         else:
             print("No audio recorded")
@@ -287,7 +310,10 @@ def transcribe_audio(audio_array):
         # Ensure the audio is 16-bit
         if audio_array.dtype != np.int16:
             # Normalize audio data to range [-1, 1] and convert to int16
-            normalized = audio_array / np.max(np.abs(audio_array))
+            m = np.max(np.abs(audio_array))
+            if m == 0:
+                m = 1  # silence passes through as zero
+            normalized = audio_array / m
             audio_int16 = (normalized * 32767).astype(np.int16)
         else:
             audio_int16 = audio_array
@@ -297,17 +323,20 @@ def transcribe_audio(audio_array):
         from scipy.io.wavfile import write as wav_write
         
         wav_buffer = io.BytesIO()
-        wav_write(wav_buffer, SAMPLE_RATE, audio_int16)
-        
-        # Send to whisper service
+        # BUG 3: write at the rate the audio was captured at, not a hardcoded 16kHz.
+        # scipy's wav writer packs the rate into a 32-bit int (struct('<H') would
+        # reject a float), so cast — the value is always a whole-Hz rate.
+        fs = int(RECORDED_SAMPLE_RATE)
+        if fs <= 0:
+            fs = int(SAMPLE_RATE)
+        wav_write(wav_buffer, fs, audio_int16)
+
+        # Send to the Whisper ASR Webservice (BUG 1: the OpenAI-style endpoint
+        # is dead; the real contract is POST /asr with an `audio_file` field)
         response = requests.post(
-            "http://gangolf:9000/v1/audio/transcriptions",
-            files={"file": ("audio.wav", wav_buffer.getvalue(), "audio/wav")},
-            data={
-                "model": "whisper-1",
-                "response_format": "text",
-                "language": "de"
-            }
+            "http://gangolf:9000/asr",
+            params={"task": "transcribe", "language": "de", "output": "txt"},
+            files={"audio_file": ("audio.wav", wav_buffer.getvalue(), "audio/wav")},
         )
         
         if response.status_code == 200:
@@ -402,7 +431,9 @@ def main():
     """Main function to run the audio capture and transcription process"""
     
     parser = argparse.ArgumentParser(description="Audio transcriber tool")
-    parser.add_argument("--apikey", required=True, help="API key for authentication")
+    # BUG 2: the API key is only needed for the transcription flow; --list-devices
+    # must work without one, so parse without required=True and validate below.
+    parser.add_argument("--apikey", help="API key for authentication (required for transcription, not for --list-devices)")
     parser.add_argument("--device", help="Microphone device ID (optional)")
     parser.add_argument("--list-devices", action="store_true", help="List available audio devices")
     
@@ -412,6 +443,11 @@ def main():
     if args.list_devices:
         list_audio_devices()
         return
+    
+    # Transcription flow requires an API key
+    if args.apikey is None:
+        print("Error: --apikey is required for transcription. Use --list-devices to inspect devices without a key.")
+        sys.exit(1)
     
     # Check that device ID is valid if provided
     if args.device is not None:
