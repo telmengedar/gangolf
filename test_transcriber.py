@@ -3,7 +3,7 @@
 Unit tests for audio_transcriber.py — verifies the core bugs are fixed.
 
 Run with:
-    cd /workspace/audio_transcriber
+    cd <repo>/audio_transcriber        # this directory
     sh setup_audio_env.sh            # ensures audio env is up (idempotent)
     python3 -m unittest test_transcriber -v
 
@@ -17,6 +17,7 @@ deadlocks record_audio's main-thread wait loop — that tested the fake, not the
 code.
 """
 
+import os
 import sys
 import time
 import threading
@@ -24,7 +25,7 @@ import inspect
 import unittest
 from unittest.mock import patch, MagicMock
 
-sys.path.insert(0, '/workspace/audio_transcriber')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 class _FakeInputStream:
