@@ -315,26 +315,21 @@ def record_audio(device_id=None):
         # still valid, before the stream may overwrite the buffer.
         audio_data = indata[:, 0].copy()
 
-        # Check if speech is detected
         if is_speech_detected(audio_data, THRESHOLD):
-            # If speech detected, add to buffer
-            audio_buffer.append(audio_data)
             silence_count = 0
             if not recording_started:
                 print("Speech detected, starting recording...")
                 recording_started = True
         else:
-            # If silence detected, increment silence counter
             silence_count += 1
-
-            # Stop after minimum silence period (BUG 5: use the stream's actual
-            # sample rate for the cutoff, not the global SAMPLE_RATE)
             silence_cutoff = int(MIN_SILENCE_DURATION * stream_samplerate / CHUNK_SIZE)
             if silence_count > silence_cutoff and recording_started:
                 print("Silence detected. Sending audio...")
                 stop_flag = True
 
-        # Stop after max time (BUG 7: use the stream's actual sample rate)
+        if recording_started:
+            audio_buffer.append(audio_data)
+
         if len(audio_buffer) > MAX_RECORDING_TIME * stream_samplerate / CHUNK_SIZE:
             print(f"Maximum recording time ({MAX_RECORDING_TIME}s) reached")
             stop_flag = True
