@@ -12,7 +12,6 @@ import numpy as np
 import requests
 import time
 import json
-from datetime import datetime
 import argparse
 import sys
 import os
@@ -24,25 +23,17 @@ CHANNELS = 1
 THRESHOLD = 0.01  # Silence threshold for speech detection
 MIN_SILENCE_DURATION = 0.5  # Minimum silence duration before sending
 MAX_RECORDING_TIME = 30  # Maximum recording time in seconds
+ASR_TIMEOUT = (5, 180)
+API_TIMEOUT = (5, 30)
 
 # Sample rate of the stream most recently opened by record_audio.
 # record_audio sets it right before the stream opens; transcribe_audio uses it
 # so the WAV is written at the rate the audio was actually captured at.
 RECORDED_SAMPLE_RATE = SAMPLE_RATE
 
-# (channels, sample_rate) candidates, in preference order, tried when opening
-# a device. The device's advertised default_samplerate is prepended (when it is
-# not already in the set) because that is the rate the device is currently
-# configured at — the most likely to open. 16k/mono are whisper-native and
-# produce the smallest WAV, so they rank high; the full grid means a device
-# whose advertised rate the kernel rejects still settles on a rate that opens.
 _PROBE_RATES = (16000, 48000, 44100)
 _PROBE_CHANNELS = (1, 2)
 
-# Cache of probe results, keyed by (device_id, advertised channels, advertised
-# rate). The id is stable within a process but the advertised hints can differ
-# between backends (or tests vs. reality), and a stale entry would pin the
-# wrong parameters; folding the hints into the key detects that change.
 _PROBE_CACHE = {}
 
 
@@ -58,18 +49,7 @@ def _probe_cache_key(device_id):
 
 
 def _probe_openable_params(device_id):
-    """Return a (channels, sample_rate) pair the backend will actually accept,
-    or raise if none opens.
-
-    PortAudio's ALSA backend reports max_input_channels and default_samplerate
-    as *hints*; the kernel driver ultimately decides which parameter
-    combinations are valid. The old code trusted those hints and failed on
-    real hardware with PaErrorCode -9998 (channels) / -9997 (sample rate) —
-    see audio_transcriber.log for a full capture of it. The only reliable way
-    to learn what a device accepts is to try opening it for real.
-
-    Every candidate is verified by actually opening the stream: this function
-    never reports parameters it has not proven openable."""
+    """Return the first probed (channels, sample_rate) that opens an input stream on the device, or raise."""
     max_input_channels = 0
     advertised_rate = 0
     try:
@@ -77,10 +57,8 @@ def _probe_openable_params(device_id):
         max_input_channels = int(device.get('max_input_channels') or 0)
         advertised_rate = int(device.get('default_samplerate') or 0)
     except Exception:
-        pass  # best-effort; the probe grid below is still valid
+        pass
 
-    # De-duplicated rate order: advertised rate first (if present), then the
-    # standard whisper-friendly grid.
     rates = []
     if advertised_rate > 0:
         rates.append(advertised_rate)
@@ -88,13 +66,9 @@ def _probe_openable_params(device_id):
         if r not in rates:
             rates.append(r)
 
-    import sys
     real_fd2 = sys.stderr.fileno()
     saved = os.dup(real_fd2)
     try:
-        # PortAudio prints Expression/failed diagnostics to raw stderr for
-        # every rejected combination; keep them out of user output (they are
-        # expected here, not errors).
         with open(os.devnull, 'wb') as _devnull:
             os.dup2(_devnull.fileno(), real_fd2)
             for rate in rates:
@@ -115,16 +89,7 @@ def _probe_openable_params(device_id):
 
 
 def get_best_device_parameters(device_id=None):
-    """Return stream parameters that will actually open for the given device.
-
-    On a named device the result is the first (channels, sample_rate) that
-    successfully opens an input stream — verified, not inferred. On the default
-    device (device_id is None) we return whisper-native 1ch/16k, which the
-    caller must open against a backend that resamples (Pulse/PipeWire).
-
-    Raises if no combination could be opened; callers report the device
-    Unavailable rather than advertising parameters that would fail on record.
-    """
+    """Return the stream parameters for the device; 1ch/16k for the default device, a probed pair otherwise."""
     cache_key = _probe_cache_key(device_id)
     cached = _PROBE_CACHE.get(cache_key)
     if cached is not None:
@@ -138,8 +103,8 @@ def get_best_device_parameters(device_id=None):
     result = {
         'sample_rate': probed['sample_rate'],
         'channels': probed['channels'],
-        'whisper_sample_rate': 16000,  # Whisper always expects 16kHz
-        'whisper_channels': 1  # Whisper always works with mono
+        'whisper_sample_rate': 16000,
+        'whisper_channels': 1
     }
     _PROBE_CACHE[cache_key] = result
     return result
@@ -215,10 +180,6 @@ def list_audio_devices():
     print("Available audio input devices:")
     
     try:
-        # Enumerate input devices together with their TRUE index into
-        # sd.query_devices() (the filtered-list index is useless for
-        # sd.InputStream, which needs the full-list index — this was one of
-        # the original failure modes).
         devices = sd.query_devices()
         input_devices = [(i, device) for i, device in enumerate(devices)
                          if device['max_input_channels'] > 0]
@@ -258,17 +219,11 @@ def list_audio_devices():
             print(f"  Input channels: {input_channels}")
             print(f"  Sample rate: {samplerate} Hz")
             
-            # Open the device with PROBED parameters (per-device! the old code
-            # probed with the generic 1ch/16k fallback and the wrong index,
-            # which failed on real ALSA hardware). get_best_device_parameters
-            # now opens the device itself as part of probing, so the
-            # "Available" status below means the stream really opened.
             try:
                 device_params = get_best_device_parameters(i)
                 print(f"  Status: Available for streaming (using "
                       f"{device_params['channels']}ch @ {int(device_params['sample_rate'])} Hz)")
             except Exception as e:
-                # If no parameter combination opens, mark as unusable
                 print(f"  Status: Unavailable - {e}")
                 
             if is_microphone:
@@ -305,14 +260,6 @@ def record_audio(device_id=None):
     def callback(indata, frames, time, status):
         nonlocal silence_count, recording_started, stop_flag
 
-        # CRITICAL: `indata` is the PortAudio callback buffer, REUSED on every
-        # callback, and `indata[:, 0]` is a VIEW into it, not a copy. Appending
-        # the view (as the old code did) leaves audio_buffer as a list of ~N
-        # views all pointing at ONE reused buffer — by the time the stream is
-        # closed and np.concatenate runs, every "chunk" has collapsed to the
-        # last callback's data and the actual speech is lost (Whisper then
-        # returns nothing). Copy the chunk into fresh memory now, while it is
-        # still valid, before the stream may overwrite the buffer.
         audio_data = indata[:, 0].copy()
 
         # Check if speech is detected
@@ -416,12 +363,11 @@ def transcribe_audio(audio_array):
             fs = int(SAMPLE_RATE)
         wav_write(wav_buffer, fs, audio_int16)
 
-        # Send to the Whisper ASR Webservice (BUG 1: the OpenAI-style endpoint
-        # is dead; the real contract is POST /asr with an `audio_file` field)
         response = requests.post(
             "http://gangolf:9000/asr",
             params={"task": "transcribe", "language": "en", "output": "txt", "initial_prompt": "vesper, dapper, gangolf"},
             files={"audio_file": ("audio.wav", wav_buffer.getvalue(), "audio/wav")},
+            timeout=ASR_TIMEOUT,
         )
         
         if response.status_code == 200:
@@ -449,7 +395,7 @@ def send_to_api(transcribed_text, api_key):
             "user": {
                 "name": "Rugenforth",
                 "service": "localhost",
-		"serviceId": "host"
+                "serviceId": "host"
             },
             "service": "localhost",
             "channel": "host",
@@ -465,7 +411,8 @@ def send_to_api(transcribed_text, api_key):
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json"
-            }
+            },
+            timeout=API_TIMEOUT,
         )
         
         if response.status_code == 200 or response.status_code == 201:
@@ -519,59 +466,46 @@ def main():
     """Main function to run the audio capture and transcription process"""
     
     parser = argparse.ArgumentParser(description="Audio transcriber tool")
-    # BUG 2: the API key is only needed for the transcription flow; --list-devices
-    # must work without one, so parse without required=True and validate below.
     parser.add_argument("--apikey", help="API key for authentication (required for transcription, not for --list-devices)")
     parser.add_argument("--device", help="Microphone device ID (optional)")
     parser.add_argument("--list-devices", action="store_true", help="List available audio devices")
     
     args = parser.parse_args()
     
-    # If list-devices flag is set, show devices and exit
     if args.list_devices:
         list_audio_devices()
         return
     
-    # Transcription flow requires an API key
     if args.apikey is None:
         print("Error: --apikey is required for transcription. Use --list-devices to inspect devices without a key.")
         sys.exit(1)
 
-    # Resolve the device to an int up front so the same int is used both for
-    # validation and for the actual capture. (args.device arrives as a string
-    # from the CLI; passing the raw string to sd.InputStream yields
-    # "No input device matching '0'".)
     device_id = None
     if args.device is not None:
         try:
             device_id = int(args.device)
         except ValueError:
             print("Error: Device ID must be an integer")
-            return
+            sys.exit(1)
 
         devices = sd.query_devices()
         if device_id >= len(devices):
             print(f"Error: Device ID {device_id} is out of range. Use --list-devices to see available devices.")
-            return
+            sys.exit(1)
 
         if devices[device_id]['max_input_channels'] <= 0:
             print(f"Error: Device ID {device_id} ({devices[device_id].get('name', 'unknown')}) "
                   f"has no input channels — it is not a microphone. Use --list-devices to see available devices.")
-            return
+            sys.exit(1)
 
-        # Additional validation: get_best_device_parameters opens the device
-        # with a probed (channels, rate) combination, so success here means
-        # the stream really opens (and the parameters are cached for
-        # record_audio, which reuses them via the same call).
         try:
             device_params = get_best_device_parameters(device_id)
             print(f"Device ID {device_id} is valid and available for streaming "
                   f"({device_params['channels']}ch @ {int(device_params['sample_rate'])} Hz)")
         except Exception as e:
             print(f"Error using device ID {device_id}: Device not accessible - {e}")
-            return
+            sys.exit(1)
 
-    # Run continuous capture (with the int device id, or None for the default)
     continuous_capture(args.apikey, device_id)
 
 

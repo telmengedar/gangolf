@@ -10,7 +10,7 @@ HOME_DIR="${HOME:-/root}"
 
 # 1) Python deps (PEP 668). Bounded; warn-only on failure (already-present is fine).
 timeout 90 pip install --break-system-packages --no-input --quiet \
-    sounddevice==0.5.6 soundfile==0.12.1 numpy==2.5.3 requests==2.34.2 scipy==1.18.1 || true
+    -r "$(dirname "$0")/requirements.txt" || true
 
 # 2) Runtime audio stack — mandatory; fail loudly if we can't install it.
 if ! command -v pulseaudio >/dev/null 2>&1 || ! command -v paplay >/dev/null 2>&1; then
