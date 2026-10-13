@@ -3,7 +3,7 @@
 Unit tests for audio_transcriber.py — verifies the core bugs are fixed.
 
 Run with:
-    cd <repo>/audio_transcriber        # this directory
+    cd <repo>/audio-transcriber        # this directory
     sh setup_audio_env.sh            # ensures audio env is up (idempotent)
     python3 -m unittest test_transcriber -v
 
@@ -36,28 +36,28 @@ class _FakeInputStream:
     """
 
     def __init__(self, *args, **kwargs):
-        callback = kwargs.get('callback')
-        assert callback is not None, "record_audio must pass a callback"
-        self._cb = callback
+        self._cb = kwargs.get('callback')
         self._n_speech = kwargs.get('n_speech', 1)
         self._n_silence = kwargs.get('n_silence', 0)
         self._worker = None
 
     def __enter__(self):
-        import numpy as np
+        if self._cb is None:
+            return self
 
-        def worker():
-            fr = 1024
-            speech = 0.05 * np.ones((fr, 1), dtype=np.float32)  # RMS 0.05 > 0.01
-            silence = np.zeros((fr, 1), dtype=np.float32)       # RMS 0
-            for _ in range(self._n_speech):
-                self._cb(speech, fr, None, None)
-            for _ in range(self._n_silence):
-                self._cb(silence, fr, None, None)
-
-        self._worker = threading.Thread(target=worker, daemon=True)
+        self._worker = threading.Thread(target=self._deliver, daemon=True)
         self._worker.start()
         return self
+
+    def _deliver(self):
+        import numpy as np
+        fr = 1024
+        speech = 0.05 * np.ones((fr, 1), dtype=np.float32)
+        silence = np.zeros((fr, 1), dtype=np.float32)
+        for _ in range(self._n_speech):
+            self._cb(speech, fr, None, None)
+        for _ in range(self._n_silence):
+            self._cb(silence, fr, None, None)
 
     def __exit__(self, *exc):
         if self._worker is not None:
@@ -70,6 +70,7 @@ def _record(n_speech=1, n_silence=0, sr=16000.0, max_rec=30.0):
     import numpy as np
     import audio_transcriber as at
     at.MAX_RECORDING_TIME = max_rec
+    at._PROBE_CACHE.clear()
     with patch('audio_transcriber.sd.query_devices',
                return_value=[{'max_input_channels': 1, 'default_samplerate': sr}]):
         with patch('audio_transcriber.sd.InputStream',
@@ -237,10 +238,6 @@ class TestBug3_SampleRateConsistency(unittest.TestCase):
                          "RECORDED_SAMPLE_RATE should be 44100, got %s" % at.RECORDED_SAMPLE_RATE)
 
 
-if __name__ == '__main__':
-    unittest.main(verbosity=2)
-
-
 class TestDeviceIdIntConversion(unittest.TestCase):
     """REGRESSION: main() must convert '--device <str>' to int before continuous_capture.
 
@@ -276,3 +273,58 @@ class TestDeviceIdIntConversion(unittest.TestCase):
         self.assertIsInstance(device_arg, int,
             "expected int device id, got %r (this is the original 'No input device matching' bug)" % (device_arg,))
         self.assertEqual(device_arg, 0)
+
+
+class _ReusedBufferInputStream(_FakeInputStream):
+    """sd.InputStream double that overwrites one shared `indata` buffer in
+    place before every callback, as PortAudio does."""
+
+    LEVELS = (0.05, 0.10, 0.15, 0.20)
+    SILENT_CHUNKS = 10
+
+    def _deliver(self):
+        import numpy as np
+        fr = 1024
+        reused = np.zeros((fr, 1), dtype=np.float32)
+        for level in self.LEVELS:
+            reused[:] = level
+            self._cb(reused, fr, None, None)
+        for _ in range(self.SILENT_CHUNKS):
+            reused[:] = 0.0
+            self._cb(reused, fr, None, None)
+
+
+class TestPortAudioReusedBufferContract(unittest.TestCase):
+    """record_audio must copy `indata`, not keep a view of it."""
+
+    def test_recorded_chunks_keep_their_own_data(self):
+        import numpy as np
+        import audio_transcriber as at
+        patcher = patch.object(at, 'MAX_RECORDING_TIME', 30)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        at._PROBE_CACHE.clear()
+        res = {}
+        with patch('audio_transcriber.sd.query_devices',
+                   return_value=[{'max_input_channels': 1, 'default_samplerate': 16000.0}]):
+            with patch('audio_transcriber.sd.InputStream',
+                       side_effect=lambda *a, **kw: _ReusedBufferInputStream(*a, **kw)):
+                t = threading.Thread(target=lambda: res.update(arr=at.record_audio(device_id=0)),
+                                     daemon=True)
+                t.start()
+                t.join(timeout=8)
+        self.assertFalse(t.is_alive(), "record_audio hung")
+        arr = res.get('arr')
+        self.assertIsNotNone(arr, "expected captured audio")
+        levels = _ReusedBufferInputStream.LEVELS
+        self.assertEqual(arr.shape[0], len(levels) * at.CHUNK_SIZE)
+        got = [round(float(arr[i * at.CHUNK_SIZE]), 2) for i in range(len(levels))]
+        self.assertEqual(got, list(levels),
+                         "chunks alias the reused PortAudio buffer (missing .copy()?)")
+        for i, level in enumerate(levels):
+            window = arr[i * at.CHUNK_SIZE:(i + 1) * at.CHUNK_SIZE]
+            self.assertTrue(np.allclose(window, level), "window %d is not uniformly %s" % (i, level))
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)
