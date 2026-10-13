@@ -178,8 +178,11 @@ class TestBug1_TranscribeEndpoint(unittest.TestCase):
         self.assertTrue(np.all(data == 0), "silence must pass through as zeros")
 
     def test_live_endpoint_smoke(self):
-        """If the whisper service is reachable, a 1.5s 440 Hz POST must return a str."""
+        """A 1.5s tone sent to the live whisper service gets HTTP 200 and its body is returned as the transcription."""
+        import io
         import urllib.request
+        import requests
+        from scipy.io import wavfile
         try:
             urllib.request.urlopen('http://gangolf:9000/openapi.json', timeout=3)
         except Exception:
@@ -188,11 +191,25 @@ class TestBug1_TranscribeEndpoint(unittest.TestCase):
         import numpy as np
         a = (0.5 * np.sin(2 * np.pi * 440 * np.arange(16000 * 1.5) / 16000)).astype('float32')
         at.RECORDED_SAMPLE_RATE = 16000.0
+        exchanges = []
+        real_post = requests.post
+
+        def recording_post(*args, **kwargs):
+            response = real_post(*args, **kwargs)
+            exchanges.append((kwargs, response))
+            return response
+
         t0 = time.time()
-        txt = at.transcribe_audio(a)
-        self.assertIsInstance(txt, str,
-                              "live tone must transcribe to a str, got %r" % (txt,))
+        with patch('audio_transcriber.requests.post', side_effect=recording_post):
+            txt = at.transcribe_audio(a)
         self.assertLess(time.time() - t0, 60, "live transcription unexpectedly slow")
+        self.assertEqual(len(exchanges), 1)
+        kwargs, response = exchanges[0]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(txt, response.text.strip())
+        sent_rate, sent_samples = wavfile.read(io.BytesIO(kwargs['files']['audio_file'][1]))
+        self.assertEqual(sent_rate, 16000)
+        self.assertEqual(len(sent_samples), 24000)
 
 
 class TestBug2_ListDevicesNoApikey(unittest.TestCase):

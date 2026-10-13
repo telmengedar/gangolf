@@ -13,6 +13,7 @@ import requests
 import time
 import json
 import argparse
+import contextlib
 import sys
 import os
 
@@ -26,9 +27,6 @@ MAX_RECORDING_TIME = 30  # Maximum recording time in seconds
 ASR_TIMEOUT = (5, 180)
 API_TIMEOUT = (5, 30)
 
-# Sample rate of the stream most recently opened by record_audio.
-# record_audio sets it right before the stream opens; transcribe_audio uses it
-# so the WAV is written at the rate the audio was actually captured at.
 RECORDED_SAMPLE_RATE = SAMPLE_RATE
 
 _PROBE_RATES = (16000, 48000, 44100)
@@ -48,8 +46,25 @@ def _probe_cache_key(device_id):
     return (device_id, hints[0], hints[1])
 
 
+@contextlib.contextmanager
+def _raw_stderr_silenced():
+    try:
+        real_fd2 = sys.stderr.fileno()
+    except (AttributeError, OSError, ValueError):
+        yield
+        return
+    saved = os.dup(real_fd2)
+    try:
+        with open(os.devnull, 'wb') as devnull:
+            os.dup2(devnull.fileno(), real_fd2)
+            yield
+    finally:
+        os.dup2(saved, real_fd2)
+        os.close(saved)
+
+
 def _probe_openable_params(device_id):
-    """Return the first probed (channels, sample_rate) that opens an input stream on the device, or raise."""
+    """Return {'sample_rate', 'channels'} for the first combination that opens an input stream on the device; raise RuntimeError if none opens."""
     max_input_channels = 0
     advertised_rate = 0
     try:
@@ -66,30 +81,23 @@ def _probe_openable_params(device_id):
         if r not in rates:
             rates.append(r)
 
-    real_fd2 = sys.stderr.fileno()
-    saved = os.dup(real_fd2)
-    try:
-        with open(os.devnull, 'wb') as _devnull:
-            os.dup2(_devnull.fileno(), real_fd2)
-            for rate in rates:
-                for channels in _PROBE_CHANNELS:
-                    if max_input_channels and channels > max_input_channels:
-                        continue
-                    try:
-                        with sd.InputStream(device=device_id, channels=channels, samplerate=rate):
-                            return {'sample_rate': rate, 'channels': channels}
-                    except Exception:
-                        continue
-    finally:
-        os.dup2(saved, real_fd2)
-        os.close(saved)
+    with _raw_stderr_silenced():
+        for rate in rates:
+            for channels in _PROBE_CHANNELS:
+                if max_input_channels and channels > max_input_channels:
+                    continue
+                try:
+                    with sd.InputStream(device=device_id, channels=channels, samplerate=rate):
+                        return {'sample_rate': rate, 'channels': channels}
+                except Exception:
+                    continue
 
     raise RuntimeError(
         f"device {device_id!r} could not be opened with any probed (channels, sample_rate) combination")
 
 
 def get_best_device_parameters(device_id=None):
-    """Return the stream parameters for the device; 1ch/16k for the default device, a probed pair otherwise."""
+    """Return a dict of sample_rate, channels, whisper_sample_rate and whisper_channels, cached per process; 1ch/16k for the default device, probed otherwise; raise if the device opens with no combination."""
     cache_key = _probe_cache_key(device_id)
     cached = _PROBE_CACHE.get(cache_key)
     if cached is not None:
@@ -250,10 +258,6 @@ def record_audio(device_id=None):
     
     print("Listening for speech... Speak now (silence will trigger sending)")
     
-    # The stream's sample rate, resolved before the stream opens. Used by the
-    # callback to compute the silence/max-time cutoffs (BUG 5/7 — the stream
-    # may run at a rate different from the global SAMPLE_RATE), and recorded
-    # into RECORDED_SAMPLE_RATE for transcribe_audio (BUG 3).
     stream_samplerate = SAMPLE_RATE
     stop_flag = False
 
@@ -293,8 +297,6 @@ def record_audio(device_id=None):
                 'whisper_channels': 1
             }
 
-        # Resolve the stream sample rate up front so the cutoffs and the WAV
-        # write rate agree with what the stream actually produces (BUG 3).
         stream_samplerate = device_params['sample_rate']
         global RECORDED_SAMPLE_RATE
         RECORDED_SAMPLE_RATE = stream_samplerate
@@ -303,11 +305,6 @@ def record_audio(device_id=None):
         with sd.InputStream(callback=callback, channels=device_params['channels'], samplerate=device_params['sample_rate'],
                            blocksize=CHUNK_SIZE, device=device_id):
 
-            # BUG 4: sd.InputStream ignores the callback return value, so
-            # `return False` in the callback never stopped the stream and the
-            # old `while True: time.sleep(...)` loop hung forever. Instead the
-            # callback sets stop_flag and we exit this loop (and thus the
-            # `with` block) once it is raised.
             while not stop_flag:
                 time.sleep(0.05)
 
@@ -339,7 +336,7 @@ def transcribe_audio(audio_array):
             # Normalize audio data to range [-1, 1] and convert to int16
             m = np.max(np.abs(audio_array))
             if m == 0:
-                m = 1  # silence passes through as zero
+                m = 1
             normalized = audio_array / m
             audio_int16 = (normalized * 32767).astype(np.int16)
         else:
@@ -350,9 +347,6 @@ def transcribe_audio(audio_array):
         from scipy.io.wavfile import write as wav_write
         
         wav_buffer = io.BytesIO()
-        # BUG 3: write at the rate the audio was captured at, not a hardcoded 16kHz.
-        # scipy's wav writer packs the rate into a 32-bit int (struct('<H') would
-        # reject a float), so cast — the value is always a whole-Hz rate.
         fs = int(RECORDED_SAMPLE_RATE)
         if fs <= 0:
             fs = int(SAMPLE_RATE)

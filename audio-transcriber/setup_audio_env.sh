@@ -8,9 +8,12 @@
 set -e
 HOME_DIR="${HOME:-/root}"
 
-# 1) Python deps (PEP 668). Bounded; warn-only on failure (already-present is fine).
-timeout 90 pip install --break-system-packages --no-input --quiet \
-    -r "$(dirname "$0")/requirements.txt" || true
+REQUIREMENTS="$(dirname "$0")/requirements.txt"
+if [ ! -f "$REQUIREMENTS" ]; then
+    echo "Error: $REQUIREMENTS not found; keep requirements.txt next to this script." >&2
+    exit 1
+fi
+timeout 90 pip install --break-system-packages --no-input --quiet -r "$REQUIREMENTS"
 
 # 2) Runtime audio stack — mandatory; fail loudly if we can't install it.
 if ! command -v pulseaudio >/dev/null 2>&1 || ! command -v paplay >/dev/null 2>&1; then
