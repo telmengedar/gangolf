@@ -1,0 +1,117 @@
+package processor
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/telmengedar/gangolf/ai-core/internal/window"
+)
+
+// RunTimeout is how long one run may take before the client gives up.
+const RunTimeout = 700 * time.Second
+
+const bodyPrefixSize = 200
+
+// Client calls processor's run endpoint.
+type Client struct {
+	base    string
+	subject int64
+	config  int64
+	http    *http.Client
+}
+
+// Result is what a run produced; Silent means nothing is posted, and Chosen and Failed mark two of the reasons.
+type Result struct {
+	Reply  string
+	Silent bool
+	Chosen bool
+	Failed bool
+}
+
+// New returns a client for the processor at base that anchors runs on subject and selects the config node.
+func New(base string, subject, config int64, httpClient *http.Client) *Client {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: RunTimeout}
+	}
+	return &Client{base: strings.TrimRight(base, "/"), subject: subject, config: config, http: httpClient}
+}
+
+type runRequest struct {
+	Input   string         `json:"input"`
+	Subject int64          `json:"subject"`
+	Config  int64          `json:"config"`
+	History []wireExchange `json:"history"`
+}
+
+type wireExchange struct {
+	Input string `json:"input"`
+	Reply string `json:"reply,omitempty"`
+}
+
+type runResponse struct {
+	Reply    string `json:"reply"`
+	Produced *bool  `json:"produced"`
+	Silent   bool   `json:"silent"`
+}
+
+type errorEnvelope struct {
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// Run asks processor to answer input given the earlier conversation.
+func (c *Client) Run(ctx context.Context, input string, history []window.Exchange) (Result, error) {
+	exchanges := make([]wireExchange, len(history))
+	for i, exchange := range history {
+		exchanges[i] = wireExchange{Input: exchange.Input, Reply: exchange.Reply}
+	}
+	encoded, err := json.Marshal(runRequest{Input: input, Subject: c.subject, Config: c.config, History: exchanges})
+	if err != nil {
+		return Result{}, fmt.Errorf("processor run: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/runs", bytes.NewReader(encoded))
+	if err != nil {
+		return Result{}, fmt.Errorf("processor run: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.http.Do(request)
+	if err != nil {
+		return Result{}, fmt.Errorf("processor run: %w", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return Result{}, fmt.Errorf("processor run: read response: %w", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		return Result{}, failure(response.StatusCode, body)
+	}
+	var decoded runResponse
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return Result{}, fmt.Errorf("processor run: decode response: %w", err)
+	}
+	chosen := decoded.Silent
+	failed := !chosen && decoded.Produced != nil && !*decoded.Produced
+	silent := chosen || failed || strings.TrimSpace(decoded.Reply) == ""
+	return Result{Reply: decoded.Reply, Silent: silent, Chosen: chosen, Failed: failed}, nil
+}
+
+func failure(status int, body []byte) error {
+	var envelope errorEnvelope
+	if json.Unmarshal(body, &envelope) == nil && envelope.Error.Code != "" {
+		return fmt.Errorf("processor run: status %d: %s: %s", status, envelope.Error.Code, envelope.Error.Message)
+	}
+	text := string(body)
+	if len(text) > bodyPrefixSize {
+		text = text[:bodyPrefixSize]
+	}
+	return fmt.Errorf("processor run: status %d: %s", status, text)
+}
