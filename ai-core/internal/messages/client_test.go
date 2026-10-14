@@ -274,3 +274,60 @@ func TestPostFailureIsAnErrorWithoutTheKey(t *testing.T) {
 		t.Fatalf("err = %v, want a 403 error without the key", err)
 	}
 }
+
+func TestPostToAPlatformChannelNamesThatChannelAsItsOwnTarget(t *testing.T) {
+	client, _, body := serve(t, 200, `{}`)
+
+	if err := client.Post(context.Background(), window.Key{Service: "Twitch", Channel: "rugenforth"}, "hi"); err != nil {
+		t.Fatal(err)
+	}
+
+	var posted []map[string]any
+	if err := json.Unmarshal([]byte(*body), &posted); err != nil {
+		t.Fatal(err)
+	}
+	targets, ok := posted[0]["postTo"].([]any)
+	if !ok || len(targets) != 1 {
+		t.Fatalf("postTo = %v, want exactly one target", posted[0]["postTo"])
+	}
+	target := targets[0].(map[string]any)
+	if len(target) != 2 || target["service"] != "Twitch" || target["name"] != "rugenforth" {
+		t.Fatalf("target = %v, want {service: Twitch, name: rugenforth}", target)
+	}
+}
+
+func TestPostToALocalhostChannelCarriesNoPostTo(t *testing.T) {
+	for _, service := range []string{"localhost", "Localhost"} {
+		client, _, body := serve(t, 200, `{}`)
+
+		if err := client.Post(context.Background(), window.Key{Service: service, Channel: "host"}, "hi"); err != nil {
+			t.Fatal(err)
+		}
+
+		if strings.Contains(*body, "postTo") {
+			t.Fatalf("service %s body = %s, want no postTo so the post is stored directly", service, *body)
+		}
+	}
+}
+
+func TestTheReadBackOfAReplyIsRecognisedAsGangolfsOwnAndNeverAnswered(t *testing.T) {
+	client, _, _ := serve(t, 200, `{"result":[{"service":"Twitch","channel":"rugenforth","user":{"name":"GangolfBot"},"time":"2026-10-14T12:41:14","chunks":[
+		{"type":"User","data":"Gangolf"},
+		{"type":"Text","data":"hello chat"}
+	]}],"total":1}`)
+	lines, err := client.List(context.Background(), time.Now())
+	if err != nil || len(lines) != 1 {
+		t.Fatalf("lines = %+v err = %v", lines, err)
+	}
+	if lines[0].Text != "hello chat" || lines[0].Speaker != "GangolfBot" {
+		t.Fatalf("line = %+v, want the text without the leading User chunk, spoken by GangolfBot", lines[0])
+	}
+
+	windows := window.New("GangolfBot")
+	now := time.Now()
+	windows.Ingest(lines, now)
+
+	if key, ready := windows.Next(now.Add(time.Hour), time.Second); ready {
+		t.Fatalf("channel %v is ready to be answered, want Gangolf's own line to stay unanswered", key)
+	}
+}

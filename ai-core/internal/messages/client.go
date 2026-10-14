@@ -19,6 +19,8 @@ import (
 // BotServiceID is the service-side id every Gangolf reply is posted under.
 const BotServiceID = "GangolfBot"
 
+const directService = "localhost"
+
 const (
 	requestTimeout = 30 * time.Second
 	bodyPrefixSize = 200
@@ -68,11 +70,17 @@ type wireChunk struct {
 }
 
 type postMessage struct {
-	Service string      `json:"service"`
-	Channel string      `json:"channel"`
-	User    postUser    `json:"user"`
-	Chunks  []postChunk `json:"chunks"`
-	Tts     bool        `json:"tts"`
+	Service string       `json:"service"`
+	Channel string       `json:"channel"`
+	User    postUser     `json:"user"`
+	Chunks  []postChunk  `json:"chunks"`
+	Tts     bool         `json:"tts"`
+	PostTo  []postTarget `json:"postTo,omitempty"`
+}
+
+type postTarget struct {
+	Service string `json:"service"`
+	Name    string `json:"name"`
 }
 
 type postUser struct {
@@ -122,7 +130,7 @@ func (c *Client) List(ctx context.Context, from time.Time) ([]window.Line, error
 	return lines, nil
 }
 
-// Post stores one Gangolf reply in the channel.
+// Post sends one Gangolf reply to the channel; on a chat platform it is stored when that platform reads it back.
 func (c *Client) Post(ctx context.Context, key window.Key, text string) error {
 	payload := []postMessage{{
 		Service: key.Service,
@@ -130,6 +138,7 @@ func (c *Client) Post(ctx context.Context, key window.Key, text string) error {
 		User:    postUser{Service: key.Service, ServiceID: BotServiceID, Name: c.bot},
 		Chunks:  []postChunk{{Type: 0, Data: text}},
 		Tts:     true,
+		PostTo:  targetsFor(key),
 	}}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -144,6 +153,13 @@ func (c *Client) Post(ctx context.Context, key window.Key, text string) error {
 		return fmt.Errorf("post message: %w", err)
 	}
 	return nil
+}
+
+func targetsFor(key window.Key) []postTarget {
+	if strings.EqualFold(key.Service, directService) {
+		return nil
+	}
+	return []postTarget{{Service: key.Service, Name: key.Channel}}
 }
 
 func (c *Client) do(request *http.Request) ([]byte, error) {
