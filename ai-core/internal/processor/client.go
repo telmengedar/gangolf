@@ -26,10 +26,12 @@ type Client struct {
 	http    *http.Client
 }
 
-// Result is what a run produced: a reply, or the decision to stay silent.
+// Result is what a run produced; Silent means nothing is posted, and Chosen and Failed mark two of the reasons.
 type Result struct {
 	Reply  string
 	Silent bool
+	Chosen bool
+	Failed bool
 }
 
 // New returns a client for the processor at base that anchors runs on subject and selects the config node.
@@ -55,6 +57,7 @@ type wireExchange struct {
 type runResponse struct {
 	Reply    string `json:"reply"`
 	Produced *bool  `json:"produced"`
+	Silent   bool   `json:"silent"`
 }
 
 type errorEnvelope struct {
@@ -95,8 +98,10 @@ func (c *Client) Run(ctx context.Context, input string, history []window.Exchang
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		return Result{}, fmt.Errorf("processor run: decode response: %w", err)
 	}
-	silent := (decoded.Produced != nil && !*decoded.Produced) || strings.TrimSpace(decoded.Reply) == ""
-	return Result{Reply: decoded.Reply, Silent: silent}, nil
+	chosen := decoded.Silent
+	failed := !chosen && decoded.Produced != nil && !*decoded.Produced
+	silent := chosen || failed || strings.TrimSpace(decoded.Reply) == ""
+	return Result{Reply: decoded.Reply, Silent: silent, Chosen: chosen, Failed: failed}, nil
 }
 
 func failure(status int, body []byte) error {

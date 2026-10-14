@@ -167,12 +167,26 @@ func (c *Core) turn(ctx context.Context, key window.Key) {
 		"inputBytes", len(batch.Input),
 		"tookMs", took.Milliseconds(),
 		"replyBytes", len(text),
-		"silent", silent)
+		"silent", silent,
+		"outcome", outcome(result, silent))
 	if silent {
 		return
 	}
 	if err := c.messages.Post(ctx, key, text); err != nil {
 		c.log.Error("post failed", "channel", key.Channel, "error", err.Error())
+	}
+}
+
+func outcome(result processor.Result, silent bool) string {
+	switch {
+	case result.Chosen:
+		return "chose-silence"
+	case result.Failed:
+		return "failed"
+	case silent:
+		return "empty"
+	default:
+		return "replied"
 	}
 }
 

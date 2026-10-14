@@ -107,6 +107,66 @@ func TestRunWithABlankReplyIsSilent(t *testing.T) {
 	}
 }
 
+func TestRunWithSilentTrueIsAChosenSilence(t *testing.T) {
+	client, _, _ := serve(t, 200, `{"reply":"","written":{},"produced":false,"silent":true}`)
+
+	result, err := client.Run(context.Background(), "x", nil)
+
+	if err != nil || !result.Silent || !result.Chosen || result.Failed {
+		t.Fatalf("result = %+v err = %v, want a chosen silence", result, err)
+	}
+}
+
+func TestRunWithSilentTrueStaysChosenWhateverElseItCarries(t *testing.T) {
+	client, _, _ := serve(t, 200, `{"reply":"text around the marker","silent":true}`)
+
+	result, err := client.Run(context.Background(), "x", nil)
+
+	if err != nil || !result.Silent || !result.Chosen || result.Failed {
+		t.Fatalf("result = %+v err = %v, want a chosen silence", result, err)
+	}
+}
+
+func TestRunWithProducedFalseAndNoSilentKeyIsAFailure(t *testing.T) {
+	client, _, _ := serve(t, 200, `{"reply":"Sorry, I could not put an answer together.","produced":false}`)
+
+	result, err := client.Run(context.Background(), "x", nil)
+
+	if err != nil || !result.Silent || result.Chosen || !result.Failed {
+		t.Fatalf("result = %+v err = %v, want a failed turn", result, err)
+	}
+}
+
+func TestRunWithSilentFalseAndProducedFalseIsAFailure(t *testing.T) {
+	client, _, _ := serve(t, 200, `{"reply":"Sorry","produced":false,"silent":false}`)
+
+	result, err := client.Run(context.Background(), "x", nil)
+
+	if err != nil || result.Chosen || !result.Failed {
+		t.Fatalf("result = %+v err = %v, want a failed turn", result, err)
+	}
+}
+
+func TestRunWithABlankReplyIsNeitherChosenNorFailed(t *testing.T) {
+	client, _, _ := serve(t, 200, `{"reply":" "}`)
+
+	result, err := client.Run(context.Background(), "x", nil)
+
+	if err != nil || !result.Silent || result.Chosen || result.Failed {
+		t.Fatalf("result = %+v err = %v, want plain silence", result, err)
+	}
+}
+
+func TestRunWithAReplyIsNeitherChosenNorFailed(t *testing.T) {
+	client, _, _ := serve(t, 200, `{"reply":"fine","produced":true}`)
+
+	result, err := client.Run(context.Background(), "x", nil)
+
+	if err != nil || result.Silent || result.Chosen || result.Failed {
+		t.Fatalf("result = %+v err = %v, want a reply", result, err)
+	}
+}
+
 func TestErrorBodyIsDecodedIntoCodeAndMessage(t *testing.T) {
 	client, _, _ := serve(t, 502, `{"error":{"code":"model_unavailable","message":"the model call did not complete"}}`)
 

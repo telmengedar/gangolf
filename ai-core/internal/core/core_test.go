@@ -684,6 +684,57 @@ func TestSilentResultPostsNothingAndStillConsumesTheBatch(t *testing.T) {
 	}
 }
 
+func turnLogFor(t *testing.T, result processor.Result) (*rig, string) {
+	t.Helper()
+	r := newRig(t)
+	r.runner.result = result
+	r.bootstrap(t)
+	r.advance(time.Second)
+	r.messages.add(channel, "vesper", "hi", r.clock)
+	r.tick()
+	r.settle()
+	for _, line := range strings.Split(r.logs.String(), "\n") {
+		if strings.Contains(line, "msg=turn") {
+			return r, line
+		}
+	}
+	t.Fatalf("logs = %s, want a turn line", r.logs.String())
+	return r, ""
+}
+
+func TestTurnLogTellsEveryOutcomeApart(t *testing.T) {
+	cases := []struct {
+		name   string
+		result processor.Result
+		want   string
+		silent string
+		posts  int
+	}{
+		{"chosen silence", processor.Result{Silent: true, Chosen: true}, "outcome=chose-silence", "silent=true", 0},
+		{"failed turn", processor.Result{Reply: "Sorry, I could not put an answer together.", Silent: true, Failed: true}, "outcome=failed", "silent=true", 0},
+		{"blank reply", processor.Result{Silent: true}, "outcome=empty", "silent=true", 0},
+		{"reply that sanitises to nothing", processor.Result{Reply: "GangolfBot:"}, "outcome=empty", "silent=true", 0},
+		{"reply", processor.Result{Reply: "an answer"}, "outcome=replied", "silent=false", 1},
+	}
+	for _, c := range cases {
+		r, line := turnLogFor(t, c.result)
+		if !strings.Contains(line, c.want) || !strings.Contains(line, c.silent) {
+			t.Errorf("%s: turn line = %s, want %s and %s", c.name, line, c.want, c.silent)
+		}
+		if len(r.messages.posts) != c.posts {
+			t.Errorf("%s: posts = %+v, want %d", c.name, r.messages.posts, c.posts)
+		}
+	}
+}
+
+func TestChosenSilenceIsNotPostedEvenWithAReplyAttached(t *testing.T) {
+	r, line := turnLogFor(t, processor.Result{Reply: "left over text", Silent: true, Chosen: true})
+
+	if len(r.messages.posts) != 0 || !strings.Contains(line, "outcome=chose-silence") {
+		t.Fatalf("posts = %+v line = %s, want nothing posted and a chosen silence", r.messages.posts, line)
+	}
+}
+
 func TestSilentTurnLinesStayInTheNextTurnsHistory(t *testing.T) {
 	r := newRig(t)
 	r.runner.result = processor.Result{Silent: true}
