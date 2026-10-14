@@ -470,8 +470,9 @@ def main():
         description="Audio transcriber tool",
         epilog=f"Environment: WHISPER_ASR_URL is the whisper service base (default {DEFAULT_ASR_URL}); "
                f"GANGOLF_API_URL is the messages API base (default {DEFAULT_API_URL}). "
-               "Put the key in --apikey, never in a URL.")
-    parser.add_argument("--apikey", help="API key for authentication (required for transcription, not for --list-devices)")
+               "Never put the key in a URL.")
+    parser.add_argument("--apikey", help="API key for authentication; overrides GANGOLF_API_KEY "
+                                         "(one of the two is required for transcription, not for --list-devices)")
     parser.add_argument("--device", help="Microphone device ID (optional)")
     parser.add_argument("--list-devices", action="store_true", help="List available audio devices")
     
@@ -481,8 +482,12 @@ def main():
         list_audio_devices()
         return
     
-    if args.apikey is None:
-        print("Error: --apikey is required for transcription. Use --list-devices to inspect devices without a key.")
+    api_key = (args.apikey or "").strip() or None
+    if api_key is None:
+        api_key = os.environ.get("GANGOLF_API_KEY", "").strip() or None
+    if api_key is None:
+        print("Error: an API key is required for transcription. Pass --apikey or set GANGOLF_API_KEY. "
+              "Use --list-devices to inspect devices without a key.")
         sys.exit(1)
 
     device_id = None
@@ -512,7 +517,7 @@ def main():
             sys.exit(1)
 
     print(f"ASR: {WHISPER_ASR_URL}/asr, messages: {GANGOLF_API_URL}/v1/messages")
-    continuous_capture(args.apikey, device_id)
+    continuous_capture(api_key, device_id)
 
 
 if __name__ == "__main__":

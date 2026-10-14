@@ -21,7 +21,6 @@ import os
 import sys
 import time
 import threading
-import inspect
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -223,16 +222,14 @@ class TestBug2_ListDevicesNoApikey(unittest.TestCase):
         at.main()
         mock_list.assert_called_once()
 
-    def test_main_has_none_apikey_guard(self):
-        import audio_transcriber as at
-        self.assertIn('args.apikey is None', inspect.getsource(at.main),
-                      "main() must validate a missing --apikey on the transcription path")
-
     @patch('sys.argv', ['audio_transcriber.py'])
     def test_transcription_without_key_exits_1(self):
         import audio_transcriber as at
-        with self.assertRaises(SystemExit) as cm:
+        with patch.dict(os.environ), patch('audio_transcriber.continuous_capture') as capture, \
+                self.assertRaises(SystemExit) as cm:
+            os.environ.pop('GANGOLF_API_KEY', None)
             at.main()
+        capture.assert_not_called()
         self.assertEqual(cm.exception.code, 1)
 
 
