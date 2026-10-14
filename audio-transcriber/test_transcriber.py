@@ -136,10 +136,11 @@ class TestBug1_TranscribeEndpoint(unittest.TestCase):
             return at.transcribe_audio(a), p
 
     def test_uses_asr_endpoint_and_audio_file_field(self):
+        import audio_transcriber as at
         _, p = self._call()
         self.assertTrue(p.called, "requests.post was not called")
         args = p.call_args
-        self.assertEqual(args[0][0], "http://gangolf:9000/asr")
+        self.assertEqual(args[0][0], at.WHISPER_ASR_URL + "/asr")
         files = args[1].get('files', {})
         self.assertIn('audio_file', files, "expected 'audio_file'; got %s" % list(files.keys()))
         self.assertNotIn('file', files)
@@ -183,11 +184,11 @@ class TestBug1_TranscribeEndpoint(unittest.TestCase):
         import urllib.request
         import requests
         from scipy.io import wavfile
+        import audio_transcriber as at
         try:
-            urllib.request.urlopen('http://gangolf:9000/openapi.json', timeout=3)
+            urllib.request.urlopen(at.WHISPER_ASR_URL + '/openapi.json', timeout=3)
         except Exception:
             self.skipTest("whisper service unreachable")
-        import audio_transcriber as at
         import numpy as np
         a = (0.5 * np.sin(2 * np.pi * 440 * np.arange(16000 * 1.5) / 16000)).astype('float32')
         at.RECORDED_SAMPLE_RATE = 16000.0
