@@ -25,10 +25,10 @@ func serve(t *testing.T, status int, body string) (*processor.Client, *http.Requ
 		_, _ = io.WriteString(w, body)
 	}))
 	t.Cleanup(server.Close)
-	return processor.New(server.URL+"/", 1090, server.Client()), &seen, &seenBody
+	return processor.New(server.URL+"/", 1090, 4242, server.Client()), &seen, &seenBody
 }
 
-func TestRunsRequestShapeCarriesNoIdentityOrConfig(t *testing.T) {
+func TestRunsRequestShapeCarriesSubjectAndConfigButNoIdentity(t *testing.T) {
 	client, seen, body := serve(t, 200, `{"reply":"hi"}`)
 	history := []window.Exchange{{Input: "vesper: hello", Reply: "hey"}, {Input: "dapper: anyone there"}}
 
@@ -44,10 +44,10 @@ func TestRunsRequestShapeCarriesNoIdentityOrConfig(t *testing.T) {
 	if err := json.Unmarshal([]byte(*body), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if len(decoded) != 3 {
-		t.Fatalf("body keys = %v, want exactly input, subject and history", keys(decoded))
+	if len(decoded) != 4 {
+		t.Fatalf("body keys = %v, want exactly input, subject, config and history", keys(decoded))
 	}
-	if string(decoded["input"]) != `"rugen: gangolf?"` || string(decoded["subject"]) != "1090" {
+	if string(decoded["input"]) != `"rugen: gangolf?"` || string(decoded["subject"]) != "1090" || string(decoded["config"]) != "4242" {
 		t.Fatalf("body = %s", *body)
 	}
 	if string(decoded["history"]) != `[{"input":"vesper: hello","reply":"hey"},{"input":"dapper: anyone there"}]` {
@@ -147,7 +147,7 @@ func TestMalformedSuccessBodyIsAnError(t *testing.T) {
 
 func TestTransportFailureIsAnError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	client := processor.New(server.URL, 1090, server.Client())
+	client := processor.New(server.URL, 1090, 4242, server.Client())
 	server.Close()
 
 	if _, err := client.Run(context.Background(), "x", nil); err == nil {

@@ -11,12 +11,13 @@ func TestSetAndDefaultedVariablesAreNamedInOrder(t *testing.T) {
 		"GANGOLF_API_KEY":   "k.s",
 		"GANGOLF_CHANNELS":  "twitch/stream",
 		"PROCESSOR_SUBJECT": "42",
+		"PROCESSOR_CONFIG":  "7",
 	}))
 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(cfg.set, ",") != "GANGOLF_API_KEY,GANGOLF_CHANNELS,PROCESSOR_SUBJECT" {
+	if strings.Join(cfg.set, ",") != "GANGOLF_API_KEY,GANGOLF_CHANNELS,PROCESSOR_SUBJECT,PROCESSOR_CONFIG" {
 		t.Fatalf("set = %v", cfg.set)
 	}
 	if strings.Join(cfg.defaulted, ",") != "GANGOLF_API_URL,GANGOLF_BOT_NAME,PROCESSOR_URL" {
@@ -32,6 +33,7 @@ func TestStartupLogNamesVariablesAndNeverPrintsValues(t *testing.T) {
 		"GANGOLF_BOT_NAME":  "Distinctivebot",
 		"PROCESSOR_URL":     "http://internal-host.invalid:8080",
 		"PROCESSOR_SUBJECT": "424242",
+		"PROCESSOR_CONFIG":  "737373",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -41,12 +43,12 @@ func TestStartupLogNamesVariablesAndNeverPrintsValues(t *testing.T) {
 	logStartup(slog.New(slog.NewTextHandler(&logs, nil)), cfg)
 
 	out := logs.String()
-	for _, value := range []string{"hunter2", "topsecretvalue", "privatechannel", "Distinctivebot", "internal-host", "424242", "example.invalid"} {
+	for _, value := range []string{"hunter2", "topsecretvalue", "privatechannel", "Distinctivebot", "internal-host", "424242", "737373", "example.invalid"} {
 		if strings.Contains(out, value) {
 			t.Fatalf("startup log printed a configured value %q: %s", value, out)
 		}
 	}
-	for _, name := range []string{"GANGOLF_API_KEY", "GANGOLF_API_URL", "PROCESSOR_SUBJECT"} {
+	for _, name := range []string{"GANGOLF_API_KEY", "GANGOLF_API_URL", "PROCESSOR_SUBJECT", "PROCESSOR_CONFIG"} {
 		if !strings.Contains(out, name) {
 			t.Fatalf("startup log = %s, want the variable name %s", out, name)
 		}

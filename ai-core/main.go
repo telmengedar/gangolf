@@ -30,7 +30,7 @@ func main() {
 	defer stop()
 
 	messageClient := messages.New(cfg.apiURL, cfg.apiKey, cfg.botName, nil, log)
-	processorClient := processor.New(cfg.processorURL, cfg.subject, nil)
+	processorClient := processor.New(cfg.processorURL, cfg.subject, cfg.processorConfig, nil)
 	core.New(core.Config{
 		Channels: cfg.channels,
 		BotName:  cfg.botName,

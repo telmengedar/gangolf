@@ -14,6 +14,7 @@ All configuration is environment variables.
 | `GANGOLF_BOT_NAME` | no | Gangolf's speaker name, default `GangolfBot` |
 | `PROCESSOR_URL` | no | processor base, default `http://gangolf:8080` |
 | `PROCESSOR_SUBJECT` | no | node the processor anchors on, default `1090` |
+| `PROCESSOR_CONFIG` | no | id of the `processor-config` node sent with every run, default `17607` (Gangolf's config) |
 
 ## Build and run
 

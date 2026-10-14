@@ -13,17 +13,19 @@ const (
 	defaultBotName      = "GangolfBot"
 	defaultProcessorURL = "http://gangolf:8080"
 	defaultSubject      = 1090
+	defaultConfig       = 17607
 )
 
 type config struct {
-	apiURL       string
-	apiKey       string
-	channels     []window.Key
-	botName      string
-	processorURL string
-	subject      int64
-	set          []string
-	defaulted    []string
+	apiURL          string
+	apiKey          string
+	channels        []window.Key
+	botName         string
+	processorURL    string
+	subject         int64
+	processorConfig int64
+	set             []string
+	defaulted       []string
 }
 
 func loadConfig(lookup func(string) (string, bool)) (config, error) {
@@ -37,11 +39,12 @@ func loadConfig(lookup func(string) (string, bool)) (config, error) {
 		return fallback
 	}
 	cfg := config{
-		apiURL:       get("GANGOLF_API_URL", defaultAPIURL),
-		apiKey:       get("GANGOLF_API_KEY", ""),
-		botName:      get("GANGOLF_BOT_NAME", defaultBotName),
-		processorURL: get("PROCESSOR_URL", defaultProcessorURL),
-		subject:      defaultSubject,
+		apiURL:          get("GANGOLF_API_URL", defaultAPIURL),
+		apiKey:          get("GANGOLF_API_KEY", ""),
+		botName:         get("GANGOLF_BOT_NAME", defaultBotName),
+		processorURL:    get("PROCESSOR_URL", defaultProcessorURL),
+		subject:         defaultSubject,
+		processorConfig: defaultConfig,
 	}
 	if cfg.apiKey == "" {
 		return config{}, fmt.Errorf("GANGOLF_API_KEY is required")
@@ -57,6 +60,13 @@ func loadConfig(lookup func(string) (string, bool)) (config, error) {
 			return config{}, fmt.Errorf("PROCESSOR_SUBJECT must be a positive integer")
 		}
 		cfg.subject = subject
+	}
+	if raw := get("PROCESSOR_CONFIG", ""); raw != "" {
+		processorConfig, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || processorConfig <= 0 {
+			return config{}, fmt.Errorf("PROCESSOR_CONFIG must be a positive integer")
+		}
+		cfg.processorConfig = processorConfig
 	}
 	cfg.set, cfg.defaulted = set, defaulted
 	return cfg, nil

@@ -20,7 +20,7 @@ func TestDefaultsApplyWhenOnlyTheRequiredVariablesAreSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.apiURL != "https://gangolf.mamgo.io/api" || cfg.botName != "GangolfBot" || cfg.processorURL != "http://gangolf:8080" || cfg.subject != 1090 {
+	if cfg.apiURL != "https://gangolf.mamgo.io/api" || cfg.botName != "GangolfBot" || cfg.processorURL != "http://gangolf:8080" || cfg.subject != 1090 || cfg.processorConfig != 17607 {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 }
@@ -33,6 +33,7 @@ func TestEveryVariableOverridesItsDefault(t *testing.T) {
 		"GANGOLF_BOT_NAME":  "Gangolf",
 		"PROCESSOR_URL":     "http://processor.example.invalid:9",
 		"PROCESSOR_SUBJECT": "42",
+		"PROCESSOR_CONFIG":  "99",
 	}))
 
 	if err != nil {
@@ -42,7 +43,7 @@ func TestEveryVariableOverridesItsDefault(t *testing.T) {
 	if len(cfg.channels) != 2 || cfg.channels[0] != want[0] || cfg.channels[1] != want[1] {
 		t.Fatalf("channels = %v, want %v", cfg.channels, want)
 	}
-	if cfg.apiURL != "https://api.example.invalid/x" || cfg.apiKey != "k.s" || cfg.botName != "Gangolf" || cfg.processorURL != "http://processor.example.invalid:9" || cfg.subject != 42 {
+	if cfg.apiURL != "https://api.example.invalid/x" || cfg.apiKey != "k.s" || cfg.botName != "Gangolf" || cfg.processorURL != "http://processor.example.invalid:9" || cfg.subject != 42 || cfg.processorConfig != 99 {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 }
@@ -77,10 +78,19 @@ func TestMalformedChannelEntriesAreRejectedWithoutEchoingTheValue(t *testing.T) 
 }
 
 func TestInvalidSubjectIsRejectedWithoutEchoingTheValue(t *testing.T) {
-	for _, bad := range []string{"abc", "0", "-5"} {
+	for _, bad := range []string{"abc", "0", "-5", "99999999999999999999"} {
 		_, err := loadConfig(env(map[string]string{"GANGOLF_API_KEY": "k.s", "GANGOLF_CHANNELS": "twitch/stream", "PROCESSOR_SUBJECT": bad}))
 		if err == nil || !strings.Contains(err.Error(), "PROCESSOR_SUBJECT") || strings.Contains(err.Error(), bad) {
 			t.Fatalf("subject %q: err = %v, want the variable named and the value not echoed", bad, err)
+		}
+	}
+}
+
+func TestInvalidProcessorConfigIsRejectedWithoutEchoingTheValue(t *testing.T) {
+	for _, bad := range []string{"abc", "0", "-5", "99999999999999999999"} {
+		_, err := loadConfig(env(map[string]string{"GANGOLF_API_KEY": "k.s", "GANGOLF_CHANNELS": "twitch/stream", "PROCESSOR_CONFIG": bad}))
+		if err == nil || !strings.Contains(err.Error(), "PROCESSOR_CONFIG") || strings.Contains(err.Error(), bad) {
+			t.Fatalf("config %q: err = %v, want the variable named and the value not echoed", bad, err)
 		}
 	}
 }

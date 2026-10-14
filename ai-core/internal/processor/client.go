@@ -22,6 +22,7 @@ const bodyPrefixSize = 200
 type Client struct {
 	base    string
 	subject int64
+	config  int64
 	http    *http.Client
 }
 
@@ -31,17 +32,18 @@ type Result struct {
 	Silent bool
 }
 
-// New returns a client for the processor at base that anchors every run on subject.
-func New(base string, subject int64, httpClient *http.Client) *Client {
+// New returns a client for the processor at base that anchors runs on subject and selects the config node.
+func New(base string, subject, config int64, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: RunTimeout}
 	}
-	return &Client{base: strings.TrimRight(base, "/"), subject: subject, http: httpClient}
+	return &Client{base: strings.TrimRight(base, "/"), subject: subject, config: config, http: httpClient}
 }
 
 type runRequest struct {
 	Input   string         `json:"input"`
 	Subject int64          `json:"subject"`
+	Config  int64          `json:"config"`
 	History []wireExchange `json:"history"`
 }
 
@@ -68,7 +70,7 @@ func (c *Client) Run(ctx context.Context, input string, history []window.Exchang
 	for i, exchange := range history {
 		exchanges[i] = wireExchange{Input: exchange.Input, Reply: exchange.Reply}
 	}
-	encoded, err := json.Marshal(runRequest{Input: input, Subject: c.subject, History: exchanges})
+	encoded, err := json.Marshal(runRequest{Input: input, Subject: c.subject, Config: c.config, History: exchanges})
 	if err != nil {
 		return Result{}, fmt.Errorf("processor run: %w", err)
 	}
