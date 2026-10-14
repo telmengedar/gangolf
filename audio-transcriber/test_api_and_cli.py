@@ -251,6 +251,19 @@ class TestDeviceErrorsExitNonZero(unittest.TestCase):
         code, _ = self._run_main('3', devices=[{'max_input_channels': 1, 'name': 'mic'}])
         self.assertEqual(code, 1)
 
+    def test_device_id_equal_to_device_count_is_out_of_range(self):
+        code, params = self._run_main('1', devices=[{'max_input_channels': 1, 'name': 'mic'}])
+        self.assertEqual(code, 1)
+        params.assert_not_called()
+
+    def test_negative_device_is_out_of_range_and_never_probed(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code, params = self._run_main('-1', devices=[{'max_input_channels': 1, 'name': 'mic'}])
+        self.assertEqual(code, 1)
+        self.assertIn('out of range', output.getvalue())
+        params.assert_not_called()
+
     def test_device_without_input_channels(self):
         code, params = self._run_main('0', devices=[{'max_input_channels': 0, 'name': 'speakers'}])
         self.assertEqual(code, 1)
