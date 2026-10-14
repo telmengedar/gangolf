@@ -494,7 +494,7 @@ def main():
             sys.exit(1)
 
         devices = sd.query_devices()
-        if device_id >= len(devices):
+        if device_id < 0 or device_id >= len(devices):
             print(f"Error: Device ID {device_id} is out of range. Use --list-devices to see available devices.")
             sys.exit(1)
 
