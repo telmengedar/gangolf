@@ -28,11 +28,17 @@ from unittest.mock import patch, MagicMock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
+_real_sleep = time.sleep
+
+
 class _FakeInputStream:
     """Stand-in for sd.InputStream matching the real threading contract.
 
     Callbacks are fired from a worker thread (not synchronously in __enter__),
     and __enter__ returns an instance so record_audio's `with` block works.
+    The worker delivers the next chunk only after the wait loop has polled
+    twice, and delivers nothing once the stream is closed, so the recording
+    ends at the chunk that raised the stop flag.
     """
 
     def __init__(self, *args, **kwargs):
@@ -40,6 +46,11 @@ class _FakeInputStream:
         self._n_speech = kwargs.get('n_speech', 1)
         self._n_silence = kwargs.get('n_silence', 0)
         self._worker = None
+        self._closed = threading.Event()
+        self._polls = 0
+
+    def poll(self):
+        self._polls += 1
 
     def __enter__(self):
         if self._cb is None:
@@ -49,46 +60,67 @@ class _FakeInputStream:
         self._worker.start()
         return self
 
-    def _deliver(self):
+    def _script(self):
         import numpy as np
         fr = 1024
-        speech = 0.05 * np.ones((fr, 1), dtype=np.float32)
-        silence = np.zeros((fr, 1), dtype=np.float32)
         for _ in range(self._n_speech):
-            self._cb(speech, fr, None, None)
+            yield 0.05 * np.ones((fr, 1), dtype=np.float32)
         for _ in range(self._n_silence):
-            self._cb(silence, fr, None, None)
+            yield np.zeros((fr, 1), dtype=np.float32)
+
+    def _deliver(self):
+        for data in self._script():
+            if self._closed.is_set():
+                return
+            self._cb(data, data.shape[0], None, None)
+            target = self._polls + 2
+            while self._polls < target and not self._closed.is_set():
+                self._closed.wait(0.001)
 
     def __exit__(self, *exc):
+        self._closed.set()
         if self._worker is not None:
             self._worker.join(timeout=2)
         return False
 
 
-def _record(n_speech=1, n_silence=0, sr=16000.0, max_rec=30.0):
-    """Call record_audio against the fake stream; return (arr, still_alive, elapsed)."""
-    import numpy as np
+def _record_stream(stream_cls, max_rec=30.0, sr=16000.0):
+    """Run record_audio against `stream_cls`; return the captured array."""
     import audio_transcriber as at
-    at.MAX_RECORDING_TIME = max_rec
     at._PROBE_CACHE.clear()
-    with patch('audio_transcriber.sd.query_devices',
-               return_value=[{'max_input_channels': 1, 'default_samplerate': sr}]):
-        with patch('audio_transcriber.sd.InputStream',
-                   side_effect=lambda *a, **kw: _FakeInputStream(n_speech=n_speech, n_silence=n_silence, **kw)):
-            res = {}
-            def run():
-                res['arr'] = at.record_audio(device_id=0)
-            t = threading.Thread(target=run, daemon=True)
-            t0 = time.time()
-            t.start()
-            t.join(timeout=8)
-            alive = t.is_alive()
-            arr = res.get('arr', None)
-    if alive:
-        return None, True, time.time() - t0
-    if not isinstance(arr, np.ndarray):
-        return None, False, time.time() - t0
-    return arr, False, time.time() - t0
+    made = []
+    res = {}
+
+    def make_stream(*args, **kwargs):
+        made.append(stream_cls(*args, **kwargs))
+        return made[-1]
+
+    def paced_sleep(seconds):
+        if made:
+            made[-1].poll()
+        _real_sleep(0.001)
+
+    devices = [{'max_input_channels': 1, 'default_samplerate': sr}]
+    with patch.object(at, 'MAX_RECORDING_TIME', max_rec):
+        with patch('audio_transcriber.sd.query_devices', return_value=devices):
+            with patch('audio_transcriber.sd.InputStream', side_effect=make_stream):
+                with patch('audio_transcriber.time.sleep', paced_sleep):
+                    t = threading.Thread(target=lambda: res.update(arr=at.record_audio(device_id=0)),
+                                         daemon=True)
+                    t.start()
+                    t.join(timeout=8)
+    if t.is_alive():
+        raise AssertionError("record_audio hung")
+    return res.get('arr')
+
+
+def _fake(n_speech=1, n_silence=0):
+    return lambda *a, **kw: _FakeInputStream(*a, n_speech=n_speech, n_silence=n_silence, **kw)
+
+
+def _tail_chunks(sr=16000.0):
+    import audio_transcriber as at
+    return int(at.MIN_SILENCE_DURATION * sr / at.CHUNK_SIZE) + 1
 
 
 class TestBug1_TranscribeEndpoint(unittest.TestCase):
@@ -104,10 +136,11 @@ class TestBug1_TranscribeEndpoint(unittest.TestCase):
             return at.transcribe_audio(a), p
 
     def test_uses_asr_endpoint_and_audio_file_field(self):
+        import audio_transcriber as at
         _, p = self._call()
         self.assertTrue(p.called, "requests.post was not called")
         args = p.call_args
-        self.assertEqual(args[0][0], "http://gangolf:9000/asr")
+        self.assertEqual(args[0][0], at.WHISPER_ASR_URL + "/asr")
         files = args[1].get('files', {})
         self.assertIn('audio_file', files, "expected 'audio_file'; got %s" % list(files.keys()))
         self.assertNotIn('file', files)
@@ -146,21 +179,38 @@ class TestBug1_TranscribeEndpoint(unittest.TestCase):
         self.assertTrue(np.all(data == 0), "silence must pass through as zeros")
 
     def test_live_endpoint_smoke(self):
-        """If the whisper service is reachable, a 1.5s 440 Hz POST must return a str."""
+        """A 1.5s tone sent to the live whisper service gets HTTP 200 and its body is returned as the transcription."""
+        import io
         import urllib.request
+        import requests
+        from scipy.io import wavfile
+        import audio_transcriber as at
         try:
-            urllib.request.urlopen('http://gangolf:9000/openapi.json', timeout=3)
+            urllib.request.urlopen(at.WHISPER_ASR_URL + '/openapi.json', timeout=3)
         except Exception:
             self.skipTest("whisper service unreachable")
-        import audio_transcriber as at
         import numpy as np
         a = (0.5 * np.sin(2 * np.pi * 440 * np.arange(16000 * 1.5) / 16000)).astype('float32')
         at.RECORDED_SAMPLE_RATE = 16000.0
+        exchanges = []
+        real_post = requests.post
+
+        def recording_post(*args, **kwargs):
+            response = real_post(*args, **kwargs)
+            exchanges.append((kwargs, response))
+            return response
+
         t0 = time.time()
-        txt = at.transcribe_audio(a)
-        self.assertIsInstance(txt, str,
-                              "live tone must transcribe to a str, got %r" % (txt,))
+        with patch('audio_transcriber.requests.post', side_effect=recording_post):
+            txt = at.transcribe_audio(a)
         self.assertLess(time.time() - t0, 60, "live transcription unexpectedly slow")
+        self.assertEqual(len(exchanges), 1)
+        kwargs, response = exchanges[0]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(txt, response.text.strip())
+        sent_rate, sent_samples = wavfile.read(io.BytesIO(kwargs['files']['audio_file'][1]))
+        self.assertEqual(sent_rate, 16000)
+        self.assertEqual(len(sent_samples), 24000)
 
 
 class TestBug2_ListDevicesNoApikey(unittest.TestCase):
@@ -189,28 +239,19 @@ class TestBug2_ListDevicesNoApikey(unittest.TestCase):
 class TestBug4_RecordAudioReturns(unittest.TestCase):
     """BUG 4: once recording is underway, record_audio must RETURN (was infinite loop)."""
 
-    def _cutoff_chunks(self, sr):
-        # silence_cutoff = int(MIN_SILENCE_DURATION * sr / CHUNK_SIZE); stop needs count > cutoff
-        import audio_transcriber as at
-        return int(at.MIN_SILENCE_DURATION * sr / at.CHUNK_SIZE)
-
     def test_returns_after_silence(self):
         """Speech, then silence past the cutoff => record_audio RETURNS with the array."""
         import audio_transcriber as at
-        cutoff = self._cutoff_chunks(16000)
-        arr, alive, elapsed = _record(n_speech=1, n_silence=cutoff + 2, sr=16000.0)
-        self.assertFalse(alive, "record_audio HUNG — BUG 4 not fixed (silence path)")
-        self.assertLess(elapsed, 5, "returning took %ss — looks like a timeout, not a stop" % elapsed)
+        arr = _record_stream(_fake(n_speech=1, n_silence=_tail_chunks() + 1))
         self.assertIsNotNone(arr, "expected captured audio after speech")
-        self.assertEqual(arr.shape[0], at.CHUNK_SIZE, "one 1024-sample speech chunk expected")
+        self.assertEqual(arr.shape[0], (1 + _tail_chunks()) * at.CHUNK_SIZE,
+                         "the speech chunk and the quiet run up to the cutoff expected")
 
     def test_returns_after_max_time(self):
-        arr, alive, elapsed = _record(n_speech=3, n_silence=0, max_rec=0.001)
-        self.assertFalse(alive, "record_audio HUNG — BUG 4 not fixed (max-time path)")
-        self.assertLess(elapsed, 5, "returning took %ss — looks like a timeout, not a stop" % elapsed)
+        import audio_transcriber as at
+        arr = _record_stream(_fake(n_speech=3), max_rec=0.001)
         self.assertIsNotNone(arr, "expected captured audio (max-time path)")
-        self.assertGreaterEqual(arr.shape[0], 2048, "at least two 1024-sample chunks expected")
-        self.assertEqual(arr.shape[0], 3 * 1024, "exactly the 3 speech chunks expected")
+        self.assertEqual(arr.shape[0], at.CHUNK_SIZE, "recording stops at the first chunk over the limit")
 
     def test_continues_listening_without_speech(self):
         # Intended design: with no speech yet, record_audio waits in the loop.
@@ -232,7 +273,7 @@ class TestBug3_SampleRateConsistency(unittest.TestCase):
     """BUG 3: RECORDED_SAMPLE_RATE must equal the stream's actual sample rate."""
 
     def test_recorded_sr_reflects_device(self):
-        _record(n_speech=1, n_silence=0, sr=44100.0, max_rec=0.001)
+        _record_stream(_fake(n_speech=1), max_rec=0.001, sr=44100.0)
         import audio_transcriber as at
         self.assertEqual(at.RECORDED_SAMPLE_RATE, 44100.0,
                          "RECORDED_SAMPLE_RATE should be 44100, got %s" % at.RECORDED_SAMPLE_RATE)
@@ -280,18 +321,20 @@ class _ReusedBufferInputStream(_FakeInputStream):
     place before every callback, as PortAudio does."""
 
     LEVELS = (0.05, 0.10, 0.15, 0.20)
+    QUIET_BEFORE = 0
     SILENT_CHUNKS = 10
 
-    def _deliver(self):
+    def _script(self):
         import numpy as np
-        fr = 1024
-        reused = np.zeros((fr, 1), dtype=np.float32)
-        for level in self.LEVELS:
+        reused = np.zeros((1024, 1), dtype=np.float32)
+        for level in [0.0] * self.QUIET_BEFORE + list(self.LEVELS) + [0.0] * self.SILENT_CHUNKS:
             reused[:] = level
-            self._cb(reused, fr, None, None)
-        for _ in range(self.SILENT_CHUNKS):
-            reused[:] = 0.0
-            self._cb(reused, fr, None, None)
+            yield reused
+
+
+def _chunk_levels(arr, precision=3):
+    import audio_transcriber as at
+    return [round(float(arr[i]), precision) for i in range(0, arr.shape[0], at.CHUNK_SIZE)]
 
 
 class TestPortAudioReusedBufferContract(unittest.TestCase):
@@ -300,30 +343,48 @@ class TestPortAudioReusedBufferContract(unittest.TestCase):
     def test_recorded_chunks_keep_their_own_data(self):
         import numpy as np
         import audio_transcriber as at
-        patcher = patch.object(at, 'MAX_RECORDING_TIME', 30)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        at._PROBE_CACHE.clear()
-        res = {}
-        with patch('audio_transcriber.sd.query_devices',
-                   return_value=[{'max_input_channels': 1, 'default_samplerate': 16000.0}]):
-            with patch('audio_transcriber.sd.InputStream',
-                       side_effect=lambda *a, **kw: _ReusedBufferInputStream(*a, **kw)):
-                t = threading.Thread(target=lambda: res.update(arr=at.record_audio(device_id=0)),
-                                     daemon=True)
-                t.start()
-                t.join(timeout=8)
-        self.assertFalse(t.is_alive(), "record_audio hung")
-        arr = res.get('arr')
+        arr = _record_stream(_ReusedBufferInputStream)
         self.assertIsNotNone(arr, "expected captured audio")
         levels = _ReusedBufferInputStream.LEVELS
-        self.assertEqual(arr.shape[0], len(levels) * at.CHUNK_SIZE)
-        got = [round(float(arr[i * at.CHUNK_SIZE]), 2) for i in range(len(levels))]
-        self.assertEqual(got, list(levels),
+        self.assertEqual(arr.shape[0], (len(levels) + _tail_chunks()) * at.CHUNK_SIZE)
+        self.assertEqual(_chunk_levels(arr, 2), list(levels) + [0.0] * _tail_chunks(),
                          "chunks alias the reused PortAudio buffer (missing .copy()?)")
         for i, level in enumerate(levels):
             window = arr[i * at.CHUNK_SIZE:(i + 1) * at.CHUNK_SIZE]
             self.assertTrue(np.allclose(window, level), "window %d is not uniformly %s" % (i, level))
+
+
+class _PauseInputStream(_ReusedBufferInputStream):
+    LEVELS = (0.05, 0.002, 0.004, 0.05, 0.003, 0.002, 0.20)
+
+
+class _PreSpeechInputStream(_ReusedBufferInputStream):
+    LEVELS = (0.05, 0.10)
+    QUIET_BEFORE = 20
+
+
+class TestPausesAreKept(unittest.TestCase):
+    """Everything from the first speech to the silence cutoff belongs to the recording."""
+
+    def test_pauses_and_trailing_quiet_survive_in_order(self):
+        arr = _record_stream(_PauseInputStream)
+        self.assertIsNotNone(arr, "expected captured audio")
+        expected = list(_PauseInputStream.LEVELS) + [0.0] * _tail_chunks()
+        self.assertEqual(_chunk_levels(arr), expected)
+
+    def test_max_recording_time_counts_quiet_chunks(self):
+        import audio_transcriber as at
+        chunk_seconds = at.CHUNK_SIZE / 16000.0
+        arr = _record_stream(_fake(n_speech=1, n_silence=5), max_rec=2.5 * chunk_seconds)
+        self.assertEqual(arr.shape[0], 3 * at.CHUNK_SIZE, "recording stops at the first chunk over 2.5 chunks")
+
+    def test_quiet_before_first_speech_is_not_recorded_nor_counted(self):
+        import audio_transcriber as at
+        chunk_seconds = at.CHUNK_SIZE / 16000.0
+        arr = _record_stream(_PreSpeechInputStream, max_rec=15 * chunk_seconds)
+        self.assertIsNotNone(arr, "pre-speech time counted toward MAX_RECORDING_TIME")
+        expected = list(_PreSpeechInputStream.LEVELS) + [0.0] * _tail_chunks()
+        self.assertEqual(_chunk_levels(arr), expected)
 
 
 if __name__ == '__main__':
