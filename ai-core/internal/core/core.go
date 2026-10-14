@@ -18,6 +18,8 @@ const (
 	Overlap = 10 * time.Second
 	// Settle is how long a channel must stay quiet before its pending lines are answered.
 	Settle = 2 * time.Second
+
+	personaName = "Gangolf"
 )
 
 // Messages is the online message API as the core uses it.
@@ -47,6 +49,7 @@ type Core struct {
 	runner   Runner
 	log      *slog.Logger
 	now      func() time.Time
+	labels   []string
 	cursor   time.Time
 	fallback time.Time
 	unlisted map[window.Key]bool
@@ -65,6 +68,7 @@ func New(cfg Config, messages Messages, runner Runner, log *slog.Logger, now fun
 		unlisted: make(map[window.Key]bool),
 		allowed:  allowed,
 		interval: cfg.Interval,
+		labels:   []string{cfg.BotName, personaName},
 		windows:  window.New(cfg.BotName),
 		messages: messages,
 		runner:   runner,
@@ -152,7 +156,7 @@ func (c *Core) turn(ctx context.Context, key window.Key) {
 		c.log.Error("run failed", "channel", key.Channel, "pending", batch.Pending, "dropped", batch.Dropped, "error", err.Error())
 		return
 	}
-	text := sanitize(result.Reply)
+	text := sanitize(result.Reply, c.labels)
 	silent := result.Silent || text == ""
 	c.log.Info("turn",
 		"service", key.Service,
@@ -172,9 +176,30 @@ func (c *Core) turn(ctx context.Context, key window.Key) {
 	}
 }
 
-func sanitize(reply string) string {
-	lead := strings.TrimLeftFunc(reply, func(r rune) bool { return r == '!' || unicode.IsSpace(r) })
-	return strings.TrimRightFunc(lead, unicode.IsSpace)
+func sanitize(reply string, labels []string) string {
+	text := trimLead(reply)
+	for {
+		stripped, ok := stripLabel(text, labels)
+		if !ok {
+			return strings.TrimRightFunc(text, unicode.IsSpace)
+		}
+		text = trimLead(stripped)
+	}
+}
+
+func trimLead(text string) string {
+	return strings.TrimLeftFunc(text, func(r rune) bool { return r == '!' || unicode.IsSpace(r) })
+}
+
+func stripLabel(text string, labels []string) (string, bool) {
+	for _, label := range labels {
+		n := len(label)
+		if n == 0 || len(text) <= n || text[n] != ':' || !strings.EqualFold(text[:n], label) {
+			continue
+		}
+		return text[n+1:], true
+	}
+	return text, false
 }
 
 func sleep(ctx context.Context, d time.Duration) bool {

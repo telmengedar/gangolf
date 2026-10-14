@@ -567,6 +567,102 @@ func TestAReplyOfOnlyBangsIsNotPosted(t *testing.T) {
 	}
 }
 
+func postedFor(t *testing.T, reply string) []posted {
+	t.Helper()
+	return postedAs(t, "GangolfBot", reply)
+}
+
+func postedAs(t *testing.T, botName, reply string) []posted {
+	t.Helper()
+	r := newRig(t)
+	log := slog.New(slog.NewTextHandler(r.logs, nil))
+	r.core = core.New(core.Config{Channels: []window.Key{channel}, BotName: botName, Interval: time.Millisecond}, r.messages, r.runner, log, func() time.Time { return r.clock })
+	r.runner.result = processor.Result{Reply: reply}
+	r.bootstrap(t)
+	r.advance(time.Second)
+	r.messages.add(channel, "vesper", "hi", r.clock)
+	r.tick()
+	r.settle()
+	return r.messages.posts
+}
+
+func TestOwnSpeakerLabelIsStrippedFromTheStartOfTheReply(t *testing.T) {
+	cases := map[string]string{
+		"Gangolf: what's the point?": "what's the point?",
+		"GangolfBot: hello":          "hello",
+		"gangolf:hello":              "hello",
+		"GANGOLFBOT:   hello":        "hello",
+		"  Gangolf: hello  ":         "hello",
+		"Gangolf: GangolfBot: hello": "hello",
+		"Gangolf: !shout hello":      "shout hello",
+		"!Gangolf: hello":            "hello",
+		"Gangolf:\n\nhello":          "hello",
+	}
+	for reply, want := range cases {
+		posts := postedFor(t, reply)
+		if len(posts) != 1 || posts[0].text != want {
+			t.Errorf("reply %q: posts = %+v, want %q", reply, posts, want)
+		}
+	}
+}
+
+func TestSpeakerLabelInsideTheReplyIsKept(t *testing.T) {
+	cases := []string{
+		"He said Gangolf: hello",
+		"Hello\nGangolf: hello",
+		"Gangolf is here: hello",
+		"Gangolfs: hello",
+		"Gangolf",
+		"Another: Gangolf: hello",
+	}
+	for _, reply := range cases {
+		posts := postedFor(t, reply)
+		if len(posts) != 1 || posts[0].text != reply {
+			t.Errorf("reply %q: posts = %+v, want it untouched", reply, posts)
+		}
+	}
+}
+
+func TestAReplyOfOnlyTheSpeakerLabelIsNotPosted(t *testing.T) {
+	for _, reply := range []string{"Gangolf:", "GangolfBot:  ", "Gangolf: GangolfBot:\n", "Gangolf: !!"} {
+		if posts := postedFor(t, reply); len(posts) != 0 {
+			t.Errorf("reply %q: posts = %+v, want nothing posted", reply, posts)
+		}
+	}
+}
+
+func TestConfiguredBotNameLabelIsStripped(t *testing.T) {
+	cases := map[string]string{
+		"Gandalf: hi":          "hi",
+		"gANDALF:hi":           "hi",
+		"Gangolf: Gandalf: hi": "hi",
+		"GangolfBot: hi":       "GangolfBot: hi",
+		"He said Gandalf: hi":  "He said Gandalf: hi",
+	}
+	for reply, want := range cases {
+		posts := postedAs(t, "Gandalf", reply)
+		if len(posts) != 1 || posts[0].text != want {
+			t.Errorf("reply %q: posts = %+v, want %q", reply, posts, want)
+		}
+	}
+}
+
+func TestLabelMatchIgnoresCaseInAnyPosition(t *testing.T) {
+	for _, reply := range []string{"gangolfBot: hi", "GangolfBOT: hi", "gAngolf: hi"} {
+		posts := postedFor(t, reply)
+		if len(posts) != 1 || posts[0].text != "hi" {
+			t.Errorf("reply %q: posts = %+v, want %q", reply, posts, "hi")
+		}
+	}
+}
+
+func TestEmptyBotNameNeverStripsALeadingColon(t *testing.T) {
+	posts := postedAs(t, "", ":) hi")
+	if len(posts) != 1 || posts[0].text != ":) hi" {
+		t.Fatalf("posts = %+v, want the reply untouched", posts)
+	}
+}
+
 func TestSilentResultPostsNothingAndStillConsumesTheBatch(t *testing.T) {
 	r := newRig(t)
 	r.runner.result = processor.Result{Reply: "Sorry, I could not put an answer together.", Silent: true}
