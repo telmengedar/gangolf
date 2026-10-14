@@ -140,6 +140,7 @@ class TestMainReportsEndpoints(unittest.TestCase):
                 patch('audio_transcriber.get_best_device_parameters', side_effect=params_error), \
                 patch('audio_transcriber.list_audio_devices'), \
                 patch('audio_transcriber.continuous_capture') as capture, \
+                patch.dict(os.environ, {k: v for k, v in os.environ.items() if k != 'GANGOLF_API_KEY'}, clear=True), \
                 contextlib.redirect_stdout(output):
             capture.side_effect = lambda *_: self.printed_at_capture.append(output.getvalue())
             try:
@@ -192,6 +193,102 @@ class TestMainReportsEndpoints(unittest.TestCase):
         flattened = ' '.join(output.split())
         for expected in ('WHISPER_ASR_URL', 'GANGOLF_API_URL', at.DEFAULT_ASR_URL, at.DEFAULT_API_URL):
             self.assertIn(expected, flattened)
+
+
+class TestApiKeyFromEnvironment(unittest.TestCase):
+
+    def _run_main(self, *arguments, environment=None):
+        env = {k: v for k, v in os.environ.items() if k != 'GANGOLF_API_KEY'}
+        env.update(environment or {})
+        output = io.StringIO()
+        code = None
+        with patch('sys.argv', ['audio_transcriber.py', *arguments]), \
+                patch('audio_transcriber.continuous_capture') as capture, \
+                patch.dict(os.environ, env, clear=True), \
+                contextlib.redirect_stdout(output):
+            try:
+                at.main()
+            except SystemExit as exit_:
+                code = exit_.code
+        return output.getvalue(), capture, code
+
+    def test_environment_key_is_used_when_no_flag_is_given(self):
+        _, capture, code = self._run_main(environment={'GANGOLF_API_KEY': 'ENV-KEY'})
+        self.assertIsNone(code)
+        capture.assert_called_once_with('ENV-KEY', None)
+
+    def test_flag_wins_over_environment(self):
+        _, capture, _ = self._run_main('--apikey', 'FLAG-KEY', environment={'GANGOLF_API_KEY': 'ENV-KEY'})
+        capture.assert_called_once_with('FLAG-KEY', None)
+
+    def test_flag_alone_still_works(self):
+        _, capture, _ = self._run_main('--apikey', 'FLAG-KEY')
+        capture.assert_called_once_with('FLAG-KEY', None)
+
+    def test_environment_key_is_trimmed(self):
+        _, capture, _ = self._run_main(environment={'GANGOLF_API_KEY': '  ENV-KEY \t'})
+        capture.assert_called_once_with('ENV-KEY', None)
+
+    def test_blank_environment_key_counts_as_unset(self):
+        for blank in ('', '   ', '\t'):
+            with self.subTest(blank=repr(blank)):
+                _, capture, code = self._run_main(environment={'GANGOLF_API_KEY': blank})
+                self.assertEqual(code, 1)
+                capture.assert_not_called()
+
+    def test_blank_environment_key_leaves_the_flag_in_charge(self):
+        _, capture, _ = self._run_main('--apikey', 'FLAG-KEY', environment={'GANGOLF_API_KEY': '   '})
+        capture.assert_called_once_with('FLAG-KEY', None)
+
+    def test_blank_flag_counts_as_unset_and_the_environment_key_is_used(self):
+        for blank in ('', '   '):
+            with self.subTest(blank=repr(blank)):
+                _, capture, _ = self._run_main('--apikey', blank, environment={'GANGOLF_API_KEY': 'ENV-KEY'})
+                capture.assert_called_once_with('ENV-KEY', None)
+
+    def test_blank_flag_without_environment_key_exits_one(self):
+        for blank in ('', '   '):
+            with self.subTest(blank=repr(blank)):
+                _, capture, code = self._run_main('--apikey', blank)
+                self.assertEqual(code, 1)
+                capture.assert_not_called()
+
+    def test_flag_key_is_trimmed(self):
+        _, capture, _ = self._run_main('--apikey', '  FLAG-KEY ')
+        capture.assert_called_once_with('FLAG-KEY', None)
+
+    def test_missing_key_exits_one_naming_both_ways_to_supply_it(self):
+        output, capture, code = self._run_main()
+        self.assertEqual(code, 1)
+        self.assertIn('--apikey', output)
+        self.assertIn('GANGOLF_API_KEY', output)
+        capture.assert_not_called()
+
+    def test_key_is_never_printed(self):
+        cases = {
+            'environment': dict(arguments=(), environment={'GANGOLF_API_KEY': 'SECRET-ENV'}),
+            'flag': dict(arguments=('--apikey', 'SECRET-FLAG'), environment={}),
+            'both': dict(arguments=('--apikey', 'SECRET-FLAG'), environment={'GANGOLF_API_KEY': 'SECRET-ENV'}),
+        }
+        for name, case in cases.items():
+            with self.subTest(name):
+                output, capture, code = self._run_main(*case['arguments'], environment=case['environment'])
+                self.assertIsNone(code)
+                capture.assert_called_once()
+                self.assertIn('ASR: ', output)
+                self.assertNotIn('SECRET', output)
+
+    def test_list_devices_needs_no_key(self):
+        with patch('audio_transcriber.list_audio_devices') as listing:
+            _, capture, code = self._run_main('--list-devices')
+        self.assertIsNone(code)
+        listing.assert_called_once_with()
+        capture.assert_not_called()
+
+    def test_help_names_the_key_variable(self):
+        output, _, code = self._run_main('--help')
+        self.assertEqual(code, 0)
+        self.assertIn('GANGOLF_API_KEY', ' '.join(output.split()))
 
 
 class TestAsrTimeout(unittest.TestCase):
