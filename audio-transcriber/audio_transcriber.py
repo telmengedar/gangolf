@@ -3,8 +3,8 @@
 Audio capture and transcription tool that:
 1. Records audio from microphone continuously
 2. Detects speech segments (filters out silence)
-3. Sends segments to whisper service at http://gangolf:9000
-4. Posts transcribed text to https://gangolf.mamgo.io/api/v1/messages
+3. Sends segments to the whisper service named by WHISPER_ASR_URL
+4. Posts transcribed text to the messages API named by GANGOLF_API_URL
 """
 
 import sounddevice as sd
@@ -28,6 +28,18 @@ ASR_TIMEOUT = (5, 180)
 API_TIMEOUT = (5, 30)
 
 RECORDED_SAMPLE_RATE = SAMPLE_RATE
+
+
+def _resolve_endpoint(variable, default):
+    """Return the base URL in the environment variable, or the default when it is unset or blank, without trailing slashes."""
+    value = os.environ.get(variable, "").strip().rstrip("/")
+    return value or default
+
+
+DEFAULT_ASR_URL = "http://gangolf:9000"
+DEFAULT_API_URL = "https://gangolf.mamgo.io/api"
+WHISPER_ASR_URL = _resolve_endpoint("WHISPER_ASR_URL", DEFAULT_ASR_URL)
+GANGOLF_API_URL = _resolve_endpoint("GANGOLF_API_URL", DEFAULT_API_URL)
 
 _PROBE_RATES = (16000, 48000, 44100)
 _PROBE_CHANNELS = (1, 2)
@@ -328,7 +340,7 @@ def record_audio(device_id=None):
 
 
 def transcribe_audio(audio_array):
-    """Send audio to whisper service at http://gangolf:9000 for transcription"""
+    """Send audio to the whisper service at WHISPER_ASR_URL for transcription"""
     
     try:
         # Ensure the audio is 16-bit
@@ -353,7 +365,7 @@ def transcribe_audio(audio_array):
         wav_write(wav_buffer, fs, audio_int16)
 
         response = requests.post(
-            "http://gangolf:9000/asr",
+            f"{WHISPER_ASR_URL}/asr",
             params={"task": "transcribe", "language": "en", "output": "txt", "initial_prompt": "vesper, dapper, gangolf"},
             files={"audio_file": ("audio.wav", wav_buffer.getvalue(), "audio/wav")},
             timeout=ASR_TIMEOUT,
@@ -395,7 +407,7 @@ def send_to_api(transcribed_text, api_key):
         }
         
         response = requests.post(
-            "https://gangolf.mamgo.io/api/v1/messages",
+            f"{GANGOLF_API_URL}/v1/messages",
             data=json.dumps([payload]),
             headers={
                 "Authorization": f"Bearer {api_key}",
@@ -454,7 +466,11 @@ def continuous_capture(api_key, device_id=None):
 def main():
     """Main function to run the audio capture and transcription process"""
     
-    parser = argparse.ArgumentParser(description="Audio transcriber tool")
+    parser = argparse.ArgumentParser(
+        description="Audio transcriber tool",
+        epilog=f"Environment: WHISPER_ASR_URL is the whisper service base (default {DEFAULT_ASR_URL}); "
+               f"GANGOLF_API_URL is the messages API base (default {DEFAULT_API_URL}). "
+               "Put the key in --apikey, never in a URL.")
     parser.add_argument("--apikey", help="API key for authentication (required for transcription, not for --list-devices)")
     parser.add_argument("--device", help="Microphone device ID (optional)")
     parser.add_argument("--list-devices", action="store_true", help="List available audio devices")
@@ -495,6 +511,7 @@ def main():
             print(f"Error using device ID {device_id}: Device not accessible - {e}")
             sys.exit(1)
 
+    print(f"ASR: {WHISPER_ASR_URL}/asr, messages: {GANGOLF_API_URL}/v1/messages")
     continuous_capture(args.apikey, device_id)
 
 

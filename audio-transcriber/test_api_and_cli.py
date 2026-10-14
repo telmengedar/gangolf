@@ -1,8 +1,10 @@
-"""Tests for send_to_api, request timeouts, the --device exit codes and the probe's stderr handling."""
+"""Tests for send_to_api, endpoint configuration, request timeouts, the --device exit codes and the probe's stderr handling."""
 
+import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -31,7 +33,7 @@ class TestSendToApi(unittest.TestCase):
     def test_posts_message_list_to_messages_endpoint_with_bearer_key(self):
         ok, post = self._send("hello world")
         self.assertTrue(ok)
-        self.assertEqual(post.call_args[0][0], "https://gangolf.mamgo.io/api/v1/messages")
+        self.assertEqual(post.call_args[0][0], at.GANGOLF_API_URL + "/v1/messages")
         headers = post.call_args[1]['headers']
         self.assertEqual(headers['Authorization'], "Bearer KEY")
         self.assertEqual(headers['Content-Type'], "application/json")
@@ -64,6 +66,132 @@ class TestSendToApi(unittest.TestCase):
         _, post = self._send()
         self.assertEqual(post.call_args[1].get('timeout'), at.API_TIMEOUT)
         self.assertTrue(_is_finite_timeout_pair(at.API_TIMEOUT))
+
+
+class TestEndpointResolution(unittest.TestCase):
+
+    def _endpoints(self, **environment):
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("WHISPER_ASR_URL", "GANGOLF_API_URL")}
+        env.update(environment)
+        code = "import audio_transcriber as at; print(at.WHISPER_ASR_URL); print(at.GANGOLF_API_URL)"
+        result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True,
+                                cwd=os.path.dirname(os.path.abspath(__file__)), timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.split()
+
+    def test_endpoint_defaults_when_unset(self):
+        self.assertEqual(self._endpoints(), ["http://gangolf:9000", "https://gangolf.mamgo.io/api"])
+
+    def test_endpoint_blank_value_uses_default(self):
+        for blank in ("", "   "):
+            with self.subTest(blank=blank):
+                self.assertEqual(self._endpoints(WHISPER_ASR_URL=blank, GANGOLF_API_URL=blank),
+                                 ["http://gangolf:9000", "https://gangolf.mamgo.io/api"])
+
+    def test_endpoint_slashes_only_value_uses_default(self):
+        self.assertEqual(self._endpoints(WHISPER_ASR_URL="//", GANGOLF_API_URL=" // "),
+                         ["http://gangolf:9000", "https://gangolf.mamgo.io/api"])
+
+    def test_endpoint_env_override_trims_and_strips_trailing_slash(self):
+        self.assertEqual(self._endpoints(WHISPER_ASR_URL="  http://asr.test:9000//  ",
+                                         GANGOLF_API_URL="  http://api.test/api//  "),
+                         ["http://asr.test:9000", "http://api.test/api"])
+
+    def test_endpoint_override_keeps_a_path(self):
+        self.assertEqual(self._endpoints(WHISPER_ASR_URL="http://asr.test/whisper/"),
+                         ["http://asr.test/whisper", "https://gangolf.mamgo.io/api"])
+
+    def test_each_variable_redirects_only_its_own_endpoint(self):
+        self.assertEqual(self._endpoints(WHISPER_ASR_URL="http://asr.test:1/"),
+                         ["http://asr.test:1", "https://gangolf.mamgo.io/api"])
+        self.assertEqual(self._endpoints(GANGOLF_API_URL="http://api.test/api/"),
+                         ["http://gangolf:9000", "http://api.test/api"])
+
+
+class TestConfiguredEndpointsAreUsed(unittest.TestCase):
+
+    def test_transcribe_posts_to_configured_asr_base(self):
+        with patch.object(at, 'WHISPER_ASR_URL', 'http://asr.test:1234/whisper'), \
+                patch.object(at, 'RECORDED_SAMPLE_RATE', 16000.0), \
+                patch('audio_transcriber.requests.post') as post:
+            post.return_value = MagicMock(status_code=200, text="text")
+            at.transcribe_audio(0.5 * np.ones(16000, dtype='float32'))
+        self.assertEqual(post.call_args[0][0], "http://asr.test:1234/whisper/asr")
+
+    def test_send_posts_to_configured_api_base(self):
+        with patch.object(at, 'GANGOLF_API_URL', 'http://api.test:5/api'), \
+                patch('audio_transcriber.requests.post') as post:
+            post.return_value = MagicMock(status_code=200, text="ok")
+            at.send_to_api("hello", "KEY")
+        self.assertEqual(post.call_args[0][0], "http://api.test:5/api/v1/messages")
+
+
+class TestMainReportsEndpoints(unittest.TestCase):
+
+    def _run_main(self, *arguments, devices=None, params_error=None):
+        output = io.StringIO()
+        code = None
+        self.printed_at_capture = []
+        with patch('sys.argv', ['audio_transcriber.py', *arguments]), \
+                patch.object(at, 'WHISPER_ASR_URL', 'http://asr.test:1234'), \
+                patch.object(at, 'GANGOLF_API_URL', 'http://api.test:5/api'), \
+                patch('audio_transcriber.sd.query_devices', return_value=devices or []), \
+                patch('audio_transcriber.get_best_device_parameters', side_effect=params_error), \
+                patch('audio_transcriber.list_audio_devices'), \
+                patch('audio_transcriber.continuous_capture') as capture, \
+                contextlib.redirect_stdout(output):
+            capture.side_effect = lambda *_: self.printed_at_capture.append(output.getvalue())
+            try:
+                at.main()
+            except SystemExit as exit_:
+                code = exit_.code
+        return output.getvalue(), capture, code
+
+    def test_main_prints_effective_endpoints_before_capturing(self):
+        output, capture, _ = self._run_main('--apikey', 'KEY')
+        self.assertIn('http://asr.test:1234/asr', self.printed_at_capture[0])
+        self.assertIn('http://asr.test:1234/asr', output)
+        self.assertIn('http://api.test:5/api/v1/messages', output)
+        capture.assert_called_once_with('KEY', None)
+
+    def test_failing_device_checks_print_no_endpoints(self):
+        microphone = {'max_input_channels': 1, 'name': 'mic'}
+        cases = {
+            'not an integer': dict(arguments=('--device', 'abc'), devices=[]),
+            'out of range': dict(arguments=('--device', '99'), devices=[microphone]),
+            'no input channels': dict(arguments=('--device', '0'),
+                                      devices=[{'max_input_channels': 0, 'name': 'speakers'}]),
+            'not openable': dict(arguments=('--device', '0'), devices=[microphone],
+                                 params_error=RuntimeError("cannot open")),
+        }
+        for name, case in cases.items():
+            with self.subTest(name):
+                output, capture, code = self._run_main(
+                    '--apikey', 'KEY', *case['arguments'],
+                    devices=case['devices'], params_error=case.get('params_error'))
+                self.assertEqual(code, 1)
+                self.assertNotIn('asr.test', output)
+                self.assertNotIn('api.test', output)
+                capture.assert_not_called()
+
+    def test_list_devices_prints_no_endpoints(self):
+        output, capture, _ = self._run_main('--list-devices')
+        self.assertNotIn('asr.test', output)
+        self.assertNotIn('api.test', output)
+        capture.assert_not_called()
+
+    def test_missing_key_prints_no_endpoints(self):
+        output, _, code = self._run_main()
+        self.assertEqual(code, 1)
+        self.assertNotIn('asr.test', output)
+
+    def test_help_names_both_variables_and_their_defaults(self):
+        output, _, code = self._run_main('--help')
+        self.assertEqual(code, 0)
+        flattened = ' '.join(output.split())
+        for expected in ('WHISPER_ASR_URL', 'GANGOLF_API_URL', at.DEFAULT_ASR_URL, at.DEFAULT_API_URL):
+            self.assertIn(expected, flattened)
 
 
 class TestAsrTimeout(unittest.TestCase):
