@@ -23,6 +23,8 @@ const (
 	personaName = "Gangolf"
 
 	outcomeAddressedElsewhere = "addressed-elsewhere"
+	outcomeReplied            = "replied"
+	outcomeRepeat             = "repeat"
 )
 
 // Messages is the online message API as the core uses it.
@@ -183,7 +185,11 @@ func (c *Core) turn(ctx context.Context, key window.Key) bool {
 	}
 	text := sanitize(result.Reply, c.labels)
 	silent := result.Silent || text == ""
-	c.logTurn(key, batch, took, len(text), silent, outcome(result, silent))
+	kind := outcome(result, silent)
+	if kind == outcomeReplied && repeatsAReply(text, batch.History) {
+		silent, kind = true, outcomeRepeat
+	}
+	c.logTurn(key, batch, took, len(text), silent, kind)
 	if silent {
 		return true
 	}
@@ -226,8 +232,19 @@ func outcome(result processor.Result, silent bool) string {
 	case silent:
 		return "empty"
 	default:
-		return "replied"
+		return outcomeReplied
 	}
+}
+
+func repeatsAReply(text string, history []window.Exchange) bool {
+	for _, exchange := range history {
+		for _, earlier := range strings.Split(exchange.Reply, "\n") {
+			if strings.EqualFold(strings.TrimSpace(earlier), strings.TrimSpace(text)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func sanitize(reply string, labels []string) string {
