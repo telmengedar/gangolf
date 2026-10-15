@@ -53,6 +53,7 @@ type Core struct {
 	cursor   time.Time
 	fallback time.Time
 	unlisted map[window.Key]bool
+	closing  map[window.Key]bool
 }
 
 // New returns a core wired to its two collaborators; now supplies the clock.
@@ -66,6 +67,7 @@ func New(cfg Config, messages Messages, runner Runner, log *slog.Logger, now fun
 	}
 	return &Core{
 		unlisted: make(map[window.Key]bool),
+		closing:  make(map[window.Key]bool),
 		allowed:  allowed,
 		interval: cfg.Interval,
 		labels:   []string{cfg.BotName, personaName},
@@ -97,7 +99,7 @@ func (c *Core) Run(ctx context.Context) {
 // Bootstrap loads the recent conversation as context and marks all of it answered.
 func (c *Core) Bootstrap(ctx context.Context) error {
 	c.fallback = c.now().Add(-window.MaxAge)
-	if err := c.poll(ctx, c.fallback); err != nil {
+	if err := c.poll(ctx); err != nil {
 		return err
 	}
 	c.windows.MarkAllAnswered()
@@ -106,22 +108,31 @@ func (c *Core) Bootstrap(ctx context.Context) error {
 
 // Tick polls once and answers at most one settled channel.
 func (c *Core) Tick(ctx context.Context) {
-	from := c.fallback
-	if !c.cursor.IsZero() {
-		from = c.cursor.Add(-Overlap)
-	}
-	if err := c.poll(ctx, from); err != nil {
-		c.log.Error("poll failed", "error", err.Error())
-	}
+	c.refresh(ctx)
 	now := c.now()
 	c.windows.Evict(now)
 	if key, ok := c.windows.Next(now, Settle); ok {
 		c.turn(ctx, key)
+		c.closing[key] = true
+		c.refresh(ctx)
 	}
 }
 
-func (c *Core) poll(ctx context.Context, from time.Time) error {
-	lines, err := c.messages.List(ctx, from)
+func (c *Core) refresh(ctx context.Context) {
+	if err := c.poll(ctx); err != nil {
+		c.log.Error("poll failed", "error", err.Error())
+	}
+}
+
+func (c *Core) from() time.Time {
+	if c.cursor.IsZero() {
+		return c.fallback
+	}
+	return c.cursor.Add(-Overlap)
+}
+
+func (c *Core) poll(ctx context.Context) error {
+	lines, err := c.messages.List(ctx, c.from())
 	if err != nil {
 		return err
 	}
@@ -143,6 +154,12 @@ func (c *Core) poll(ctx context.Context, from time.Time) error {
 	c.windows.Forget(c.cursor.Add(-2 * Overlap))
 	if added > 0 {
 		c.log.Info("ingested", "lines", added)
+	}
+	for key := range c.closing {
+		if kept := c.windows.MarkAnswered(key); kept > 0 {
+			c.log.Info("kept lines written during the run as context", "service", key.Service, "channel", key.Channel, "lines", kept)
+		}
+		delete(c.closing, key)
 	}
 	return nil
 }

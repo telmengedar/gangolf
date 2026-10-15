@@ -102,6 +102,18 @@ func (w *Windows) MarkAllAnswered() {
 	}
 }
 
+// MarkAnswered clears the pending lines of one channel and returns how many it cleared.
+func (w *Windows) MarkAnswered(key Key) int {
+	cleared := 0
+	for _, e := range w.lines[key] {
+		if e.pending {
+			e.pending = false
+			cleared++
+		}
+	}
+	return cleared
+}
+
 // Forget drops dedupe memory of lines stamped before the given time.
 func (w *Windows) Forget(before time.Time) {
 	for fp, stamp := range w.seen {

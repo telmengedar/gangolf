@@ -49,6 +49,7 @@ type fakeMessages struct {
 	listErrs  int
 	postErr   error
 	onList    func(n int)
+	onPost    func()
 	echoPosts bool
 }
 
@@ -75,6 +76,9 @@ func (f *fakeMessages) List(_ context.Context, from time.Time) ([]window.Line, e
 
 func (f *fakeMessages) Post(_ context.Context, key window.Key, text string) error {
 	f.posts = append(f.posts, posted{key: key, text: text})
+	if f.onPost != nil {
+		f.onPost()
+	}
 	if f.postErr != nil {
 		return f.postErr
 	}
@@ -183,35 +187,6 @@ func TestNothingIsAnsweredBeforeTheChannelHasSettled(t *testing.T) {
 	r.tick()
 	if len(r.runner.calls) != 1 {
 		t.Fatalf("runs = %d, want one at the settle time", len(r.runner.calls))
-	}
-}
-
-func TestLinesDuringATurnBecomeTheNextInputAndNeverHistory(t *testing.T) {
-	r := newRig(t)
-	r.bootstrap(t)
-	r.advance(time.Second)
-	r.messages.add(channel, "rugenforth", "hey gangolf", r.clock)
-	r.tick()
-	r.runner.during = func() {
-		r.advance(18 * time.Second)
-		r.messages.add(channel, "dapper", "what about the pinkertons", r.clock)
-		r.runner.during = nil
-	}
-
-	r.settle()
-	r.advance(pollInterval)
-	r.tick()
-	r.settle()
-
-	if len(r.runner.calls) != 2 {
-		t.Fatalf("runs = %d, want two turns", len(r.runner.calls))
-	}
-	second := r.runner.calls[1]
-	if second.input != "dapper: what about the pinkertons" {
-		t.Fatalf("second input = %q, want only the late line", second.input)
-	}
-	if len(second.history) != 1 || second.history[0].Input != "rugenforth: hey gangolf" || second.history[0].Reply != "an answer" {
-		t.Fatalf("second history = %+v, want the first exchange with its reply", second.history)
 	}
 }
 
