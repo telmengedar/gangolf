@@ -378,7 +378,7 @@ func TestTheRecordedCorpusKeepsItsLabelledShape(t *testing.T) {
 			gated++
 		}
 	}
-	var probeCounts [3]int
+	var probeCounts [4]int
 	var probesGated int
 	for _, p := range probes {
 		probeCounts[p.label]++
@@ -389,7 +389,7 @@ func TestTheRecordedCorpusKeepsItsLabelledShape(t *testing.T) {
 	if counts != [3]int{44, 21, 29} || gated != 8 {
 		t.Fatalf("corpus holds addressed/other/room = %v and %d gated, want [44 21 29] and 8", counts, gated)
 	}
-	if probeCounts != [3]int{31, 7, 3} || probesGated != 3 {
-		t.Fatalf("probes hold addressed/other/room = %v and %d gated, want [31 7 3] and 3", probeCounts, probesGated)
+	if probeCounts != [4]int{49, 12, 3, 7} || probesGated != 13 {
+		t.Fatalf("probes hold addressed/other/room/accepted-residual = %v and %d gated, want [49 12 3 7] and 13", probeCounts, probesGated)
 	}
 }
