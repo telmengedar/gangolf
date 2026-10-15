@@ -6,6 +6,7 @@ const (
 	toGangolf label = iota
 	toSomeoneElse
 	toTheRoom
+	acceptedResidual
 )
 
 type recorded struct {
