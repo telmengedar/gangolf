@@ -345,3 +345,28 @@ func TestPendingInputCarriesTheSpeakerOfEachLine(t *testing.T) {
 		t.Fatalf("input = %q", got)
 	}
 }
+
+func TestMarkAnsweredClearsOnlyThatChannelsPendingLines(t *testing.T) {
+	w := window.New("GangolfBot")
+	w.Ingest([]window.Line{
+		say(channel, "vesper", "one", base),
+		say(channel, "dapper", "two", base.Add(time.Second)),
+		say(other, "vesper", "elsewhere", base),
+	}, base)
+
+	cleared := w.MarkAnswered(channel)
+
+	if cleared != 2 {
+		t.Fatalf("cleared = %d, want the two pending lines of the channel", cleared)
+	}
+	key, ok := w.Next(base.Add(time.Minute), 0)
+	if !ok || key != other {
+		t.Fatalf("next = %+v, %v, want the untouched channel", key, ok)
+	}
+	if again := w.MarkAnswered(channel); again != 0 {
+		t.Fatalf("second clear = %d, want none left", again)
+	}
+	if unknown := w.MarkAnswered(window.Key{Service: "x", Channel: "y"}); unknown != 0 {
+		t.Fatalf("unknown channel cleared %d, want none", unknown)
+	}
+}
