@@ -118,15 +118,34 @@ type rig struct {
 	logs     *bytes.Buffer
 }
 
+func selfRoutes(keys ...window.Key) map[window.Key][]window.Key {
+	routes := make(map[window.Key][]window.Key, len(keys))
+	for _, key := range keys {
+		routes[key] = []window.Key{key}
+	}
+	return routes
+}
+
 func newRig(t *testing.T, channels ...window.Key) *rig {
 	t.Helper()
 	if len(channels) == 0 {
 		channels = []window.Key{channel}
 	}
+	return newRoutedRig(t, selfRoutes(channels...))
+}
+
+func newRoutedRig(t *testing.T, routes map[window.Key][]window.Key) *rig {
+	t.Helper()
+	return newConfiguredRig(t, core.Config{Routes: routes})
+}
+
+func newConfiguredRig(t *testing.T, cfg core.Config) *rig {
+	t.Helper()
+	cfg.BotName, cfg.Interval = "GangolfBot", time.Millisecond
 	r := &rig{clock: start, runner: &fakeRunner{result: processor.Result{Reply: "an answer"}}, logs: &bytes.Buffer{}}
 	r.messages = &fakeMessages{clock: &r.clock, echoPosts: true}
 	log := slog.New(slog.NewTextHandler(r.logs, nil))
-	r.core = core.New(core.Config{Channels: channels, BotName: "GangolfBot", Interval: time.Millisecond}, r.messages, r.runner, log, func() time.Time { return r.clock })
+	r.core = core.New(cfg, r.messages, r.runner, log, func() time.Time { return r.clock })
 	return r
 }
 
@@ -551,7 +570,7 @@ func postedAs(t *testing.T, botName, reply string) []posted {
 	t.Helper()
 	r := newRig(t)
 	log := slog.New(slog.NewTextHandler(r.logs, nil))
-	r.core = core.New(core.Config{Channels: []window.Key{channel}, BotName: botName, Interval: time.Millisecond}, r.messages, r.runner, log, func() time.Time { return r.clock })
+	r.core = core.New(core.Config{Routes: selfRoutes(channel), BotName: botName, Interval: time.Millisecond}, r.messages, r.runner, log, func() time.Time { return r.clock })
 	r.runner.result = processor.Result{Reply: reply}
 	r.bootstrap(t)
 	r.advance(time.Second)
@@ -745,7 +764,7 @@ func TestKeyNeverReachesTheLogs(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(logs, nil))
 	client := messages.New(server.URL, key, "GangolfBot", server.Client(), log)
 	runner := &fakeRunner{}
-	c := core.New(core.Config{Channels: []window.Key{channel}, BotName: "GangolfBot", Interval: time.Millisecond}, client, runner, log, func() time.Time { return start })
+	c := core.New(core.Config{Routes: selfRoutes(channel), BotName: "GangolfBot", Interval: time.Millisecond}, client, runner, log, func() time.Time { return start })
 
 	c.Tick(context.Background())
 	_ = c.Bootstrap(context.Background())

@@ -25,9 +25,10 @@ type Key struct {
 // Line is one chat message as the window stores it.
 type Line struct {
 	Key
-	Speaker string
-	Text    string
-	Time    time.Time
+	Speaker        string
+	Text           string
+	Time           time.Time
+	CannotStartRun bool
 }
 
 // Exchange is one earlier turn: what was said and, when Gangolf answered, the answer.
@@ -38,8 +39,9 @@ type Exchange struct {
 
 // Utterance is one pending line as a speaker and a text.
 type Utterance struct {
-	Speaker string
-	Text    string
+	Speaker        string
+	Text           string
+	CannotStartRun bool
 }
 
 // Batch is one turn's material: the lines to answer and the conversation before them.
@@ -224,7 +226,7 @@ func (w *Windows) Take(key Key) Batch {
 	spoken := make([]Utterance, len(pending))
 	for i, e := range pending {
 		lines[i] = speak(e)
-		spoken[i] = Utterance{Speaker: e.Speaker, Text: e.Text}
+		spoken[i] = Utterance{Speaker: e.Speaker, Text: e.Text, CannotStartRun: e.CannotStartRun}
 	}
 	batch := Batch{
 		Input:   strings.Join(lines, "\n"),

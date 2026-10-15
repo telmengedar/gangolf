@@ -27,7 +27,7 @@ func TestSetAndDefaultedVariablesAreNamedInOrder(t *testing.T) {
 	if strings.Join(cfg.set, ",") != "GANGOLF_API_KEY,GANGOLF_CHANNELS,PROCESSOR_SUBJECT,PROCESSOR_CONFIG" {
 		t.Fatalf("set = %v", cfg.set)
 	}
-	if strings.Join(cfg.defaulted, ",") != "GANGOLF_API_URL,GANGOLF_BOT_NAME,PROCESSOR_URL" {
+	if strings.Join(cfg.defaulted, ",") != "GANGOLF_API_URL,GANGOLF_BOT_NAME,PROCESSOR_URL,GANGOLF_ROUTES,GANGOLF_MIN_WORDS" {
 		t.Fatalf("defaulted = %v", cfg.defaulted)
 	}
 }
@@ -62,6 +62,44 @@ func TestStartupLogNamesVariablesAndNeverPrintsValues(t *testing.T) {
 	}
 	if !strings.Contains(out, "channels=1") {
 		t.Fatalf("startup log = %s, want the channel count", out)
+	}
+	if !strings.Contains(out, "routed=0") {
+		t.Fatalf("startup log = %s, want no routed sources by default", out)
+	}
+}
+
+func TestStartupLogCountsRoutedSourcesWithoutNamingThem(t *testing.T) {
+	cfg, err := loadConfig(env(map[string]string{
+		"GANGOLF_API_KEY":  "k.s",
+		"GANGOLF_CHANNELS": "twitch/privatechannel,localhost/hiddenhost,localhost/secondhidden",
+		"GANGOLF_ROUTES":   "localhost/hiddenhost=*,localhost/secondhidden=twitch/privatechannel",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs strings.Builder
+
+	logStartup(slog.New(slog.NewTextHandler(&logs, nil)), cfg)
+
+	out := logs.String()
+	if !strings.Contains(out, "routed=2") || !strings.Contains(out, "GANGOLF_ROUTES") {
+		t.Fatalf("startup log = %s, want the routed count and the variable name", out)
+	}
+	for _, value := range []string{"hiddenhost", "secondhidden", "privatechannel"} {
+		if strings.Contains(out, value) {
+			t.Fatalf("startup log printed a configured channel %q: %s", value, out)
+		}
+	}
+}
+
+func TestRoutesVariableIsNamedAsSetWhenGiven(t *testing.T) {
+	cfg, err := routesOf("localhost/host,twitch/stream", "localhost/host=*")
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(cfg.set, ","), "GANGOLF_ROUTES") || strings.Contains(strings.Join(cfg.defaulted, ","), "GANGOLF_ROUTES") {
+		t.Fatalf("set = %v, defaulted = %v", cfg.set, cfg.defaulted)
 	}
 }
 
@@ -103,6 +141,7 @@ func TestEveryConfiguredValueReachesTheWire(t *testing.T) {
 		runs      recorder
 		lists     int
 		stamp     string
+		longStamp string
 		posted    = make(chan struct{}, 1)
 		listMutex sync.Mutex
 	)
@@ -117,17 +156,24 @@ func TestEveryConfiguredValueReachesTheWire(t *testing.T) {
 		}
 		listMutex.Lock()
 		lists++
-		first := lists == 1
-		if stamp == "" && !first {
+		call := lists
+		if stamp == "" && call > 1 {
 			stamp = time.Now().UTC().Format(time.RFC3339Nano)
 		}
-		at := stamp
+		if longStamp == "" && call >= 5 {
+			longStamp = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+		short, long := stamp, longStamp
 		listMutex.Unlock()
-		if first {
+		if call == 1 {
 			io.WriteString(w, `{"result":[],"total":0}`)
 			return
 		}
-		io.WriteString(w, `{"result":[{"service":"wireservice","channel":"wirechannel","user":{"name":"viewer"},"time":"`+at+`","chunks":[{"type":0,"data":"anyone there"}]}],"total":1}`)
+		rows := `{"service":"wiresource","channel":"wirehost","user":{"name":"viewer"},"time":"` + short + `","chunks":[{"type":0,"data":"anyone there"}]}`
+		if long != "" {
+			rows += `,{"service":"wiresource","channel":"wirehost","user":{"name":"viewer"},"time":"` + long + `","chunks":[{"type":0,"data":"is anyone out there at all"}]}`
+		}
+		io.WriteString(w, `{"result":[`+rows+`],"total":1}`)
 	}))
 	defer apiServer.Close()
 	processorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -139,7 +185,9 @@ func TestEveryConfiguredValueReachesTheWire(t *testing.T) {
 		"GANGOLF_API_URL":   apiServer.URL + apiSegment,
 		"GANGOLF_API_KEY":   apiKey,
 		"GANGOLF_BOT_NAME":  botName,
-		"GANGOLF_CHANNELS":  "wireservice/wirechannel",
+		"GANGOLF_CHANNELS":  "wireservice/wirechannel,wiresource/wirehost",
+		"GANGOLF_ROUTES":    "wiresource/wirehost=wireservice/wirechannel",
+		"GANGOLF_MIN_WORDS": "wiresource/wirehost=3",
 		"PROCESSOR_URL":     processorServer.URL,
 		"PROCESSOR_SUBJECT": "42",
 		"PROCESSOR_CONFIG":  "7",
@@ -189,6 +237,21 @@ func TestEveryConfiguredValueReachesTheWire(t *testing.T) {
 		if body.Config != 7 {
 			t.Fatalf("run config = %d, want 7", body.Config)
 		}
+	}
+	var first struct {
+		Input   string `json:"input"`
+		History []struct {
+			Input string `json:"input"`
+		} `json:"history"`
+	}
+	if err := json.Unmarshal(runRequests[0].body, &first); err != nil {
+		t.Fatal(err)
+	}
+	if first.Input != "viewer: is anyone out there at all" {
+		t.Fatalf("first run input = %q, want only the line long enough to start a run", first.Input)
+	}
+	if len(first.History) != 1 || first.History[0].Input != "viewer: anyone there" {
+		t.Fatalf("first run history = %+v, want the short line kept as context", first.History)
 	}
 	var posts []recordedRequest
 	for _, request := range api.all() {
