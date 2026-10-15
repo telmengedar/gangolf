@@ -109,7 +109,7 @@ func TestShutdownDuringARunStopsTheLoop(t *testing.T) {
 	defer cancel()
 	blocker := &blockingRunner{entered: cancel}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	c := core.New(core.Config{Channels: []window.Key{channel}, BotName: "GangolfBot", Interval: time.Millisecond}, r.messages, blocker, log, func() time.Time { return r.clock })
+	c := core.New(core.Config{Routes: selfRoutes(channel), BotName: "GangolfBot", Interval: time.Millisecond}, r.messages, blocker, log, func() time.Time { return r.clock })
 	r.messages.onList = func(n int) {
 		switch n {
 		case 2:
@@ -128,7 +128,7 @@ func TestShutdownDuringARunStopsTheLoop(t *testing.T) {
 
 func TestPollingWithoutAConfiguredIntervalHappensEveryTwoSeconds(t *testing.T) {
 	r := newRig(t)
-	c := core.New(core.Config{Channels: []window.Key{channel}, BotName: "GangolfBot"}, r.messages, r.runner, slog.New(slog.NewTextHandler(io.Discard, nil)), func() time.Time { return r.clock })
+	c := core.New(core.Config{Routes: selfRoutes(channel), BotName: "GangolfBot"}, r.messages, r.runner, slog.New(slog.NewTextHandler(io.Discard, nil)), func() time.Time { return r.clock })
 	ctx, cancel := context.WithTimeout(context.Background(), 2600*time.Millisecond)
 	defer cancel()
 
