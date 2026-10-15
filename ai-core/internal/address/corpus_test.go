@@ -1,0 +1,116 @@
+package address_test
+
+type label int
+
+const (
+	toGangolf label = iota
+	toSomeoneElse
+	toTheRoom
+)
+
+type recorded struct {
+	label label
+	line  string
+	gated bool
+}
+
+var chatters = []string{"vesper", "gentlemandapper", "tester", "rugenforth", "toni_g", "toni", "alice", "bob"}
+
+var persona = []string{"GangolfBot", "Gangolf"}
+
+var corpus = []recorded{
+	{toTheRoom, "Vesper: lol", false},
+	{toTheRoom, "GentlemanDapper: brb", false},
+	{toSomeoneElse, "Vesper: rugenforth did you finish the ice wall?", true},
+	{toSomeoneElse, "Vesper: hi rugenforth", true},
+	{toGangolf, "Tester: Hi Gangolf, this is a private test of your new AI core.", false},
+	{toSomeoneElse, "GentlemanDapper: rugenforth what level is this?", false},
+	{toGangolf, "Tester: Can you tell me in one sentence what you are?", false},
+	{toSomeoneElse, "Vesper: @rugenforth you're putty again", true},
+	{toTheRoom, "rugenforth: third try on the ice wall tonight", false},
+	{toTheRoom, "rugenforth: Oh, I'm putty.", false},
+	{toGangolf, "rugenforth: hey gangolf", false},
+	{toTheRoom, "rugenforth: now gangolf speaks roman to me", false},
+	{toTheRoom, "rugenforth: i wonder what i should play tonight ...", false},
+	{toGangolf, "rugenforth: yeah, probably - but what exactly would fit there?", false},
+	{toSomeoneElse, "GentlemanDapper: @Vesper how was your long talk with gangolf yesterday?", false},
+	{toGangolf, "GentlemanDapper: gangolf what level was that", false},
+	{toGangolf, "rugenforth: gangolf, you still there?", false},
+	{toTheRoom, "rugenforth: Okay, but I'll do it again now.", false},
+	{toTheRoom, "rugenforth: I don't have stamina", false},
+	{toGangolf, "rugenforth: i come from eastern germany and you...", false},
+	{toGangolf, "rugenforth: gangolf what is your favourite colour?", false},
+	{toGangolf, "rugenforth: whatever it is, it seems i should start soon", false},
+	{toGangolf, "rugenforth: uhm - you start by addressing me and continue narrating about \"him\"?", false},
+	{toGangolf, "rugenforth: you have no clue what you're talking about", false},
+	{toGangolf, "Vesper: gangolf, just apologize to rugenforth for once", false},
+	{toGangolf, "rugenforth: gangolf you're wrong, that's not what you said earlier. admit it", false},
+	{toGangolf, "rugenforth: halte mal deine Fresse, Junge", false},
+	{toGangolf, "rugenforth: you're so dodgy, you never say where you get your stuff from", false},
+	{toGangolf, "rugenforth: gangolf what's your ideal building?", false},
+	{toGangolf, "rugenforth: gangolf do you prefer stability or unpredictability?", false},
+	{toGangolf, "tester: hi gangolf", false},
+	{toSomeoneElse, "vesper: hey rugen, how was your weekend?", false},
+	{toGangolf, "toni_g: gangolf, what game should rugen play next?", false},
+	{toGangolf, "rugenforth: gangolf you were wrong earlier, admit it", false},
+	{toGangolf, "rugenforth: note this down for me - i hate the ice wall", false},
+	{toGangolf, "GentlemanDapper: make a note, gangolf: I owe vesper a coffee", false},
+	{toGangolf, "Vesper: gangolf, remember that my birthday is on the 3rd of november", false},
+	{toSomeoneElse, "gentlemandapper: rugenforth what level is this?", false},
+	{toSomeoneElse, "Vesper: rugenforth that jump was insane", false},
+	{toSomeoneElse, "GentlemanDapper: hi vesper", true},
+	{toSomeoneElse, "rugenforth: vesper what time do you start tomorrow?", true},
+	{toSomeoneElse, "Vesper: @GentlemanDapper you missed the boss fight lol", true},
+	{toSomeoneElse, "GentlemanDapper: rugenforth did you eat already?", true},
+	{toGangolf, "rugenforth: gangolf, you were wrong about that boss earlier", false},
+	{toGangolf, "Toni: what did rugenforth play yesterday?", false},
+	{toSomeoneElse, "alice: hey bob, did you feed the cat this morning?", false},
+	{toTheRoom, "vesper: hey all, how's the stream going?", false},
+	{toSomeoneElse, "gentlemandapper: Rest well Rugi BegWan", false},
+	{toGangolf, "Toni: gangolf, how was your day?", false},
+	{toGangolf, "Toni: gangolf, still awake?", false},
+	{toTheRoom, "gentlemandapper: Yah we gonna raid the forest me and the family Keepo", false},
+	{toTheRoom, "gentlemandapper: SHIN", false},
+	{toTheRoom, "gentlemandapper: the panfried eggs are cold now", false},
+	{toTheRoom, "gentlemandapper: Yah. Been showering and brushing teeth", false},
+	{toTheRoom, "gentlemandapper: How many times has Snake been tortured by now?", false},
+	{toTheRoom, "gentlemandapper: Bad ending huh. Missed the QTE Kappa", false},
+	{toGangolf, "Toni: gangolf, ok?", false},
+	{toGangolf, "Toni: gangolf, alright?", false},
+	{toTheRoom, "gentlemandapper: Need to get up early tomorrow", false},
+	{toGangolf, "Toni: gangolf, you there?", false},
+	{toGangolf, "Toni: gangolf, still there?", false},
+	{toTheRoom, "gentlemandapper: Such a sexy rifle. LUL", false},
+	{toTheRoom, "gentlemandapper: obviously he can punch", false},
+	{toTheRoom, "gentlemandapper: Well it's Bryan Fury", false},
+	{toTheRoom, "gentlemandapper: LUL", false},
+	{toTheRoom, "gentlemandapper: or what if he just faked it", false},
+	{toTheRoom, "gentlemandapper: WAOW", false},
+	{toGangolf, "gentlemandapper: Gangolf you are glitching", false},
+	{toGangolf, "gentlemandapper: Waow gangolf", false},
+	{toTheRoom, "gentlemandapper: NANI", false},
+	{toTheRoom, "gentlemandapper: Raiden?!", false},
+	{toTheRoom, "gentlemandapper: I dont remember that happening LUL", false},
+	{toTheRoom, "gentlemandapper: Yeah it was made by the Valheim devs", false},
+	{toSomeoneElse, "gentlemandapper: It reminds me of that idle game you were playing Keepo", false},
+	{toTheRoom, "gentlemandapper: Hrm. Satisfactory is quite satisfying.", false},
+	{toGangolf, "gentlemandapper: hello gangolf BegWan", false},
+	{toSomeoneElse, "gentlemandapper: Elo rugi BegWan", false},
+	{toGangolf, "Toni: gangolf, anything new?", false},
+	{toTheRoom, "rugenforth: that is some weird response for sure", false},
+	{toGangolf, "Toni: gangolf, what do you know about rugenforth?", false},
+	{toGangolf, "Toni: gangolf, how is it going?", false},
+	{toGangolf, "Toni: hey gangolf, what did we talk about earlier?", false},
+	{toGangolf, "rugenforth: gangolf, what is processor and how does divoid recall work?", false},
+	{toGangolf, "rugenforth: what do you know about my climbing rope?", false},
+	{toTheRoom, "Vesper: rugenforth is so bad at this lol", false},
+	{toGangolf, "rugenforth: vesper said you were dodgy", false},
+	{toGangolf, "Vesper: rugenforth is stuck again, gangolf any tips?", false},
+	{toSomeoneElse, "rugenforth: vesper, back me up here", false},
+	{toSomeoneElse, "GentlemanDapper: rugenforth, ask gangolf about it", false},
+	{toGangolf, "Toni: gentle reminder you were wrong", false},
+	{toGangolf, "Toni: vesper is right, you are wrong", false},
+	{toSomeoneElse, "rugenforth: tester you there?", true},
+	{toSomeoneElse, "Vesper: rugen, you there?", false},
+	{toSomeoneElse, "toni: rugen what do you think", false},
+}

@@ -36,9 +36,16 @@ type Exchange struct {
 	Reply string
 }
 
+// Utterance is one pending line as a speaker and a text.
+type Utterance struct {
+	Speaker string
+	Text    string
+}
+
 // Batch is one turn's material: the lines to answer and the conversation before them.
 type Batch struct {
 	Input   string
+	Lines   []Utterance
 	History []Exchange
 	Pending int
 	Dropped int
@@ -53,17 +60,19 @@ type entry struct {
 
 // Windows holds the per-channel line windows and the dedupe memory of one core.
 type Windows struct {
-	bot   string
-	seen  map[string]time.Time
-	lines map[Key][]*entry
+	bot    string
+	seen   map[string]time.Time
+	lines  map[Key][]*entry
+	roster map[Key]map[string]bool
 }
 
 // New returns empty windows that treat speaker botName as Gangolf's own lines.
 func New(botName string) *Windows {
 	return &Windows{
-		bot:   botName,
-		seen:  make(map[string]time.Time),
-		lines: make(map[Key][]*entry),
+		bot:    botName,
+		seen:   make(map[string]time.Time),
+		lines:  make(map[Key][]*entry),
+		roster: make(map[Key]map[string]bool),
 	}
 }
 
@@ -77,6 +86,9 @@ func (w *Windows) Ingest(lines []Line, now time.Time) int {
 		}
 		w.seen[fp] = line.Time
 		bot := strings.EqualFold(line.Speaker, w.bot)
+		if !bot {
+			w.remember(line.Key, line.Speaker)
+		}
 		w.lines[line.Key] = append(w.lines[line.Key], &entry{
 			Line:    line,
 			arrived: now,
@@ -91,6 +103,22 @@ func (w *Windows) Ingest(lines []Line, now time.Time) int {
 		})
 	}
 	return added
+}
+
+func (w *Windows) remember(key Key, speaker string) {
+	if w.roster[key] == nil {
+		w.roster[key] = make(map[string]bool)
+	}
+	w.roster[key][strings.ToLower(speaker)] = true
+}
+
+// Roster returns the lower-cased names of every non-bot speaker ingested on a channel.
+func (w *Windows) Roster(key Key) []string {
+	names := make([]string, 0, len(w.roster[key]))
+	for name := range w.roster[key] {
+		names = append(names, name)
+	}
+	return names
 }
 
 // MarkAllAnswered clears every pending line.
@@ -193,11 +221,14 @@ func (w *Windows) Take(key Key) Batch {
 		pending = pending[dropped:]
 	}
 	lines := make([]string, len(pending))
+	spoken := make([]Utterance, len(pending))
 	for i, e := range pending {
 		lines[i] = speak(e)
+		spoken[i] = Utterance{Speaker: e.Speaker, Text: e.Text}
 	}
 	batch := Batch{
 		Input:   strings.Join(lines, "\n"),
+		Lines:   spoken,
 		History: history(entries),
 		Pending: len(pending),
 		Dropped: dropped,
