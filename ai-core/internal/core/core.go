@@ -7,6 +7,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/telmengedar/gangolf/ai-core/internal/address"
 	"github.com/telmengedar/gangolf/ai-core/internal/processor"
 	"github.com/telmengedar/gangolf/ai-core/internal/window"
 )
@@ -20,6 +21,8 @@ const (
 	Settle = 2 * time.Second
 
 	personaName = "Gangolf"
+
+	outcomeAddressedElsewhere = "addressed-elsewhere"
 )
 
 // Messages is the online message API as the core uses it.
@@ -112,9 +115,10 @@ func (c *Core) Tick(ctx context.Context) {
 	now := c.now()
 	c.windows.Evict(now)
 	if key, ok := c.windows.Next(now, Settle); ok {
-		c.turn(ctx, key)
-		c.closing[key] = true
-		c.refresh(ctx)
+		if c.turn(ctx, key) {
+			c.closing[key] = true
+			c.refresh(ctx)
+		}
 	}
 }
 
@@ -164,17 +168,42 @@ func (c *Core) poll(ctx context.Context) error {
 	return nil
 }
 
-func (c *Core) turn(ctx context.Context, key window.Key) {
+func (c *Core) turn(ctx context.Context, key window.Key) bool {
 	batch := c.windows.Take(key)
+	if c.addressedElsewhere(key, batch) {
+		c.logTurn(key, batch, 0, 0, true, outcomeAddressedElsewhere)
+		return false
+	}
 	started := c.now()
 	result, err := c.runner.Run(ctx, batch.Input, batch.History)
 	took := c.now().Sub(started)
 	if err != nil {
 		c.log.Error("run failed", "channel", key.Channel, "pending", batch.Pending, "dropped", batch.Dropped, "error", err.Error())
-		return
+		return true
 	}
 	text := sanitize(result.Reply, c.labels)
 	silent := result.Silent || text == ""
+	c.logTurn(key, batch, took, len(text), silent, outcome(result, silent))
+	if silent {
+		return true
+	}
+	if err := c.messages.Post(ctx, key, text); err != nil {
+		c.log.Error("post failed", "channel", key.Channel, "error", err.Error())
+	}
+	return true
+}
+
+func (c *Core) addressedElsewhere(key window.Key, batch window.Batch) bool {
+	candidates := append(c.windows.Roster(key), key.Channel)
+	for _, line := range batch.Lines {
+		if !address.ForSomeoneElse(line.Speaker, line.Text, candidates, c.labels) {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Core) logTurn(key window.Key, batch window.Batch, took time.Duration, replyBytes int, silent bool, kind string) {
 	c.log.Info("turn",
 		"service", key.Service,
 		"channel", key.Channel,
@@ -183,15 +212,9 @@ func (c *Core) turn(ctx context.Context, key window.Key) {
 		"exchanges", len(batch.History),
 		"inputBytes", len(batch.Input),
 		"tookMs", took.Milliseconds(),
-		"replyBytes", len(text),
+		"replyBytes", replyBytes,
 		"silent", silent,
-		"outcome", outcome(result, silent))
-	if silent {
-		return
-	}
-	if err := c.messages.Post(ctx, key, text); err != nil {
-		c.log.Error("post failed", "channel", key.Channel, "error", err.Error())
-	}
+		"outcome", kind)
 }
 
 func outcome(result processor.Result, silent bool) string {
