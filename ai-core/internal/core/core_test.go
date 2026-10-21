@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -93,10 +94,11 @@ func (f *fakeMessages) add(key window.Key, speaker, text string, at time.Time) {
 }
 
 type fakeRunner struct {
-	calls  []call
-	result processor.Result
-	err    error
-	during func()
+	calls   []call
+	result  processor.Result
+	results []processor.Result
+	err     error
+	during  func()
 }
 
 func (f *fakeRunner) Run(_ context.Context, input string, history []window.Exchange) (processor.Result, error) {
@@ -106,6 +108,14 @@ func (f *fakeRunner) Run(_ context.Context, input string, history []window.Excha
 	}
 	if f.err != nil {
 		return processor.Result{}, f.err
+	}
+	if len(f.results) > 0 {
+		result := f.results[0]
+		f.results = f.results[1:]
+		return result, nil
+	}
+	if f.result.Reply == "an answer" && len(f.calls) > 1 {
+		return processor.Result{Reply: fmt.Sprintf("mock answer %d", len(f.calls))}, nil
 	}
 	return f.result, nil
 }
@@ -789,5 +799,78 @@ func TestTurnLogCarriesCountsButNoMessageText(t *testing.T) {
 	logs := r.logs.String()
 	if !strings.Contains(logs, "inputBytes") || strings.Contains(logs, "private sentence") || strings.Contains(logs, "an answer") {
 		t.Fatalf("logs = %s, want sizes only and no message text", logs)
+	}
+}
+
+func TestRepeatedAnswerGetsOneReaskAndCanThenBePosted(t *testing.T) {
+	r := newRig(t)
+	r.messages.add(channel, "vesper", "old question", r.clock.Add(-time.Minute))
+	r.messages.add(channel, "GangolfBot", "We have this already!", r.clock.Add(-time.Minute+time.Second))
+	r.bootstrap(t)
+	r.runner.results = []processor.Result{{Reply: "\"we   have this already\"."}, {Reply: "A new answer."}}
+	r.advance(time.Second)
+	r.messages.add(channel, "vesper", "new question", r.clock)
+	r.tick()
+	r.settle()
+
+	if len(r.runner.calls) != 2 || !strings.Contains(r.runner.calls[1].input, "You violated your contract and failed to behave like a natural conversation partner") || !strings.Contains(r.runner.calls[1].input, "Your answer") || !strings.Contains(r.runner.calls[1].input, "not said before") {
+		t.Fatalf("calls = %+v, want a single corrective re-ask", r.runner.calls)
+	}
+	if len(r.messages.posts) != 1 || r.messages.posts[0].text != "A new answer." {
+		t.Fatalf("posts = %+v, want the non-repeated retry", r.messages.posts)
+	}
+	if !strings.Contains(r.logs.String(), "outcome=repeat-reask") {
+		t.Fatalf("logs = %s, want observable re-ask", r.logs.String())
+	}
+}
+
+func TestRepeatComparisonUsesUnicodeCaselessMatching(t *testing.T) {
+	r := newRig(t)
+	r.messages.add(channel, "vesper", "old question", r.clock.Add(-time.Minute))
+	r.messages.add(channel, "GangolfBot", "ΟΣ", r.clock.Add(-time.Minute+time.Second))
+	r.bootstrap(t)
+	r.runner.results = []processor.Result{{Reply: "οσ"}, {Reply: "a fresh answer"}}
+	r.advance(time.Second)
+	r.messages.add(channel, "vesper", "new question", r.clock)
+	r.tick()
+	r.settle()
+
+	if len(r.runner.calls) != 2 || !strings.Contains(r.runner.calls[1].input, "You violated your contract") {
+		t.Fatalf("calls = %+v, want Unicode caseless repeat to trigger a re-ask", r.runner.calls)
+	}
+	if len(r.messages.posts) != 1 || r.messages.posts[0].text != "a fresh answer" {
+		t.Fatalf("posts = %+v, want only the fresh answer", r.messages.posts)
+	}
+}
+
+func TestRepeatedRetryIsWithheldAndMutesLaterPromptForOneHour(t *testing.T) {
+	r := newRig(t)
+	r.messages.add(channel, "vesper", "old question", r.clock.Add(-time.Minute))
+	r.messages.add(channel, "GangolfBot", "same answer", r.clock.Add(-time.Minute+time.Second))
+	r.bootstrap(t)
+	r.runner.results = []processor.Result{{Reply: "same answer"}, {Reply: "Same   answer!"}}
+	r.advance(time.Second)
+	r.messages.add(channel, "vesper", "first new question", r.clock)
+	r.tick()
+	r.settle()
+	if len(r.messages.posts) != 0 || !strings.Contains(r.logs.String(), "outcome=repeat-withheld") || !strings.Contains(r.logs.String(), "violations=1") {
+		t.Fatalf("posts = %+v, logs = %s, want withheld retry and one violation", r.messages.posts, r.logs.String())
+	}
+
+	r.runner.result = processor.Result{Reply: "another fresh answer"}
+	r.advance(time.Second)
+	r.messages.add(channel, "vesper", "second new question", r.clock)
+	r.tick()
+	r.settle()
+	if len(r.runner.calls) != 3 || !strings.Contains(r.runner.calls[2].input, "currently muted") || !strings.Contains(r.runner.calls[2].input, "1 times in the last hour") {
+		t.Fatalf("third call = %+v, want recent violation notice", r.runner.calls)
+	}
+
+	r.advance(time.Hour)
+	r.messages.add(channel, "vesper", "after decay", r.clock)
+	r.tick()
+	r.settle()
+	if len(r.runner.calls) != 4 || strings.Contains(r.runner.calls[3].input, "currently muted") {
+		t.Fatalf("fourth call = %+v, want expired violation notice", r.runner.calls)
 	}
 }

@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -21,9 +22,13 @@ const (
 	Settle = 2 * time.Second
 
 	personaName = "Gangolf"
+	// repeatHistoryExchangeLimit mirrors processor HistoryExchangeLimit from
+	// DiVoid #16291/#16334. Processor may cut further for its byte safety limit.
+	repeatHistoryExchangeLimit = 4
 
 	outcomeAddressedElsewhere = "addressed-elsewhere"
 	outcomeTooShort           = "too-short"
+	repeatViolationWindow     = time.Hour
 )
 
 // Messages is the online message API as the core uses it.
@@ -47,19 +52,20 @@ type Config struct {
 
 // Core polls, windows, runs and posts.
 type Core struct {
-	routes   map[window.Key][]window.Key
-	minWords map[window.Key]int
-	interval time.Duration
-	windows  *window.Windows
-	messages Messages
-	runner   Runner
-	log      *slog.Logger
-	now      func() time.Time
-	labels   []string
-	cursor   time.Time
-	fallback time.Time
-	unlisted map[window.Key]bool
-	closing  map[window.Key]bool
+	routes     map[window.Key][]window.Key
+	minWords   map[window.Key]int
+	interval   time.Duration
+	windows    *window.Windows
+	messages   Messages
+	runner     Runner
+	log        *slog.Logger
+	now        func() time.Time
+	labels     []string
+	cursor     time.Time
+	fallback   time.Time
+	unlisted   map[window.Key]bool
+	closing    map[window.Key]bool
+	violations map[window.Key][]time.Time
 }
 
 // New returns a core wired to its two collaborators; now supplies the clock.
@@ -68,17 +74,18 @@ func New(cfg Config, messages Messages, runner Runner, log *slog.Logger, now fun
 		cfg.Interval = PollInterval
 	}
 	return &Core{
-		unlisted: make(map[window.Key]bool),
-		closing:  make(map[window.Key]bool),
-		routes:   cfg.Routes,
-		minWords: cfg.MinWords,
-		interval: cfg.Interval,
-		labels:   []string{cfg.BotName, personaName},
-		windows:  window.New(cfg.BotName),
-		messages: messages,
-		runner:   runner,
-		log:      log,
-		now:      now,
+		unlisted:   make(map[window.Key]bool),
+		closing:    make(map[window.Key]bool),
+		violations: make(map[window.Key][]time.Time),
+		routes:     cfg.Routes,
+		minWords:   cfg.MinWords,
+		interval:   cfg.Interval,
+		labels:     []string{cfg.BotName, personaName},
+		windows:    window.New(cfg.BotName),
+		messages:   messages,
+		runner:     runner,
+		log:        log,
+		now:        now,
 	}
 }
 
@@ -185,8 +192,11 @@ func (c *Core) turn(ctx context.Context, key window.Key) bool {
 		c.logTurn(key, batch, 0, 0, true, outcomeAddressedElsewhere)
 		return false
 	}
-	started := c.now()
-	result, err := c.runner.Run(ctx, batch.Input, batch.History)
+	now := c.now()
+	c.pruneViolations(key, now)
+	input := c.withMuteNotice(key, batch.Input)
+	started := now
+	result, err := c.runner.Run(ctx, input, batch.History)
 	took := c.now().Sub(started)
 	if err != nil {
 		c.log.Error("run failed", "channel", key.Channel, "pending", batch.Pending, "dropped", batch.Dropped, "error", err.Error())
@@ -194,6 +204,29 @@ func (c *Core) turn(ctx context.Context, key window.Key) bool {
 	}
 	text := sanitize(result.Reply, c.labels)
 	silent := result.Silent || text == ""
+	if !silent && repeated(text, batch.History) {
+		notice := fmt.Sprintf("You violated your contract and failed to behave like a natural conversation partner. Your answer %q was not sent: it repeats a reply you already gave earlier in this conversation. Reply to the request with something you have not said before.", text)
+		retryInput := appendNotice(input, notice)
+		c.log.Info("repeat detected; requesting a fresh answer", "service", key.Service, "channel", key.Channel, "outcome", "repeat-reask", "violations", len(c.violations[key]))
+		retryStarted := c.now()
+		retry, retryErr := c.runner.Run(ctx, retryInput, batch.History)
+		took += c.now().Sub(retryStarted)
+		if retryErr != nil {
+			c.log.Error("repeat re-ask failed", "service", key.Service, "channel", key.Channel, "error", retryErr.Error())
+			c.logTurn(key, batch, took, 0, true, "repeat-reask-failed")
+			return true
+		}
+		text = sanitize(retry.Reply, c.labels)
+		silent = retry.Silent || text == ""
+		result = retry
+		if !silent && repeated(text, batch.History) {
+			c.violations[key] = append(c.violations[key], c.now())
+			count := len(c.violations[key])
+			c.log.Info("repeated retry withheld", "service", key.Service, "channel", key.Channel, "outcome", "repeat-withheld", "violations", count, "window", repeatViolationWindow)
+			c.logTurn(key, batch, took, len(text), true, "repeat-withheld")
+			return true
+		}
+	}
 	c.logTurn(key, batch, took, len(text), silent, outcome(result, silent))
 	if silent {
 		return true
@@ -202,6 +235,74 @@ func (c *Core) turn(ctx context.Context, key window.Key) bool {
 		c.log.Error("post failed", "channel", key.Channel, "error", err.Error())
 	}
 	return true
+}
+
+// Violations expire after one hour without another repeated retry.
+func (c *Core) pruneViolations(key window.Key, now time.Time) {
+	cutoff := now.Add(-repeatViolationWindow)
+	items := c.violations[key]
+	first := 0
+	for first < len(items) && !items[first].After(cutoff) {
+		first++
+	}
+	if first == len(items) {
+		delete(c.violations, key)
+	} else if first > 0 {
+		c.violations[key] = append([]time.Time(nil), items[first:]...)
+	}
+}
+
+func (c *Core) withMuteNotice(key window.Key, input string) string {
+	count := len(c.violations[key])
+	if count == 0 {
+		return input
+	}
+	return appendNotice(input, fmt.Sprintf("You violated your contract %d times in the last hour and are currently muted. Your response is delivered only after you start following your task.", count))
+}
+
+func appendNotice(input, notice string) string {
+	if input == "" {
+		return notice
+	}
+	return input + "\n\n" + notice
+}
+
+// repeated applies the measured case-folded, whitespace-normalized predicate
+// to each prior reply and to each line within a multiline prior reply.
+func repeated(reply string, history []window.Exchange) bool {
+	want := normalizeReply(reply)
+	if want == "" {
+		return false
+	}
+	// Processor renders only the newest four exchanges; its byte safety cut
+	// can make the visible history smaller still.
+	if len(history) > repeatHistoryExchangeLimit {
+		history = history[len(history)-repeatHistoryExchangeLimit:]
+	}
+	for _, exchange := range history {
+		for _, previous := range strings.Split(exchange.Reply, "\n") {
+			if strings.EqualFold(normalizeReply(previous), want) {
+				return true
+			}
+		}
+		if strings.EqualFold(normalizeReply(exchange.Reply), want) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeReply(reply string) string {
+	text := strings.TrimSpace(reply)
+	text = strings.TrimRightFunc(text, func(r rune) bool { return strings.ContainsRune(".!?…", r) })
+	for _, pair := range [][2]string{{"\"", "\""}, {"'", "'"}, {"“", "”"}, {"‘", "’"}, {"`", "`"}} {
+		if strings.HasPrefix(text, pair[0]) && strings.HasSuffix(text, pair[1]) && len(text) >= len(pair[0])+len(pair[1]) {
+			text = strings.TrimSpace(text[len(pair[0]) : len(text)-len(pair[1])])
+			break
+		}
+	}
+	text = strings.TrimRightFunc(text, func(r rune) bool { return strings.ContainsRune(".!?…", r) })
+	return strings.Join(strings.Fields(text), " ")
 }
 
 func cannotStartRun(batch window.Batch) bool {
