@@ -90,8 +90,12 @@ func TestPrivateMemoryWiringUsesDistinctConfigAfterPublicPostAndNeverPublishesIt
 		t.Fatal("shutdown did not cancel memory client")
 	}
 	var review struct {
-		Input   string
-		History []json.RawMessage
+		Input      string
+		History    []json.RawMessage
+		NoteSource struct {
+			Speaker string
+			Text    string
+		}
 	}
 	if err := json.Unmarshal(raw, &review); err != nil {
 		t.Fatal(err)
@@ -101,7 +105,20 @@ func TestPrivateMemoryWiringUsesDistinctConfigAfterPublicPostAndNeverPublishesIt
 	if !ok || json.Unmarshal([]byte(data), &frozen) != nil {
 		t.Fatalf("private payload=%q", review.Input)
 	}
-	if frozen["latestInput"] != "Mara: hello from the stream" || frozen["finalReply"] != "" {
+	if frozen["speaker"] != review.NoteSource.Speaker || frozen["text"] != review.NoteSource.Text || frozen["speaker"] != "Conversation transcript" || len(review.History) != 0 {
+		t.Fatalf("source parity=%+v review=%+v", frozen, review)
+	}
+	var transcript struct {
+		History []json.RawMessage
+		Latest  []struct {
+			Speaker string
+			Text    string
+		}
+	}
+	if err := json.Unmarshal([]byte(frozen["text"]), &transcript); err != nil {
+		t.Fatal(err)
+	}
+	if len(transcript.History) != 0 || len(transcript.Latest) != 1 || transcript.Latest[0].Speaker != "Mara" || transcript.Latest[0].Text != "hello from the stream" {
 		t.Fatalf("frozen=%+v", frozen)
 	}
 	mu.Lock()

@@ -43,10 +43,11 @@ func New(base string, subject, config int64, httpClient *http.Client) *Client {
 }
 
 type runRequest struct {
-	Input   string         `json:"input"`
-	Subject int64          `json:"subject"`
-	Config  int64          `json:"config"`
-	History []wireExchange `json:"history"`
+	Input      string         `json:"input"`
+	Subject    int64          `json:"subject"`
+	Config     int64          `json:"config"`
+	History    []wireExchange `json:"history"`
+	NoteSource *noteSource    `json:"noteSource,omitempty"`
 }
 
 type wireExchange struct {
@@ -69,7 +70,7 @@ type errorEnvelope struct {
 
 // Run asks processor to answer input given the earlier conversation.
 func (c *Client) Run(ctx context.Context, input string, history []window.Exchange) (Result, error) {
-	body, err := c.request(ctx, input, history, "/runs")
+	body, err := c.request(ctx, input, history, "/runs", nil)
 	if err != nil {
 		return Result{}, err
 	}
@@ -83,12 +84,12 @@ func (c *Client) Run(ctx context.Context, input string, history []window.Exchang
 	return Result{Reply: decoded.Reply, Silent: silent, Chosen: chosen, Failed: failed}, nil
 }
 
-func (c *Client) request(ctx context.Context, input string, history []window.Exchange, path string) ([]byte, error) {
+func (c *Client) request(ctx context.Context, input string, history []window.Exchange, path string, source *noteSource) ([]byte, error) {
 	exchanges := make([]wireExchange, len(history))
 	for i, exchange := range history {
 		exchanges[i] = wireExchange{Input: exchange.Input, Reply: exchange.Reply}
 	}
-	encoded, err := json.Marshal(runRequest{Input: input, Subject: c.subject, Config: c.config, History: exchanges})
+	encoded, err := json.Marshal(runRequest{Input: input, Subject: c.subject, Config: c.config, History: exchanges, NoteSource: source})
 	if err != nil {
 		return nil, fmt.Errorf("processor run: %w", err)
 	}
