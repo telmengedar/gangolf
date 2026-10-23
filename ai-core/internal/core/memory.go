@@ -10,11 +10,12 @@ import (
 
 // MemoryReviewer privately considers a completed, delivered interaction.
 type MemoryReviewer interface {
-	Review(context.Context, string, []window.Exchange, string) (processor.MemoryResult, error)
+	Review(context.Context, []window.Utterance, []window.Exchange) (processor.MemoryResult, error)
 }
 
 type memoryJob struct {
 	key     window.Key
+	lines   []window.Utterance
 	input   string
 	history []window.Exchange
 	reply   string
@@ -24,7 +25,7 @@ func (c *Core) offerMemory(ctx context.Context, key window.Key, batch window.Bat
 	if c.memoryJobs == nil || ctx.Err() != nil {
 		return
 	}
-	job := memoryJob{key: key, input: batch.Input, history: append([]window.Exchange(nil), batch.History...), reply: reply}
+	job := memoryJob{key: key, lines: append([]window.Utterance(nil), batch.Lines...), input: batch.Input, history: append([]window.Exchange(nil), batch.History...), reply: reply}
 	outcome := "queued"
 	select {
 	case c.memoryJobs <- job:
@@ -46,7 +47,7 @@ func (c *Core) reviewMemory(ctx context.Context) {
 			}
 			started := time.Now()
 			reviewCtx, cancel := context.WithTimeout(ctx, processor.MemoryReviewTimeout)
-			result, err := c.memoryReviewer.Review(reviewCtx, job.input, job.history, job.reply)
+			result, err := c.memoryReviewer.Review(reviewCtx, job.lines, job.history)
 			cancel()
 			state := result.State
 			if err != nil {

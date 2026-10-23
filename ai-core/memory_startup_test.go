@@ -90,8 +90,12 @@ func TestPrivateMemoryWiringUsesDistinctConfigAfterPublicPostAndNeverPublishesIt
 		t.Fatal("shutdown did not cancel memory client")
 	}
 	var review struct {
-		Input   string
-		History []json.RawMessage
+		Input      string
+		History    []json.RawMessage
+		NoteSource struct {
+			Speaker string
+			Text    string
+		}
 	}
 	if err := json.Unmarshal(raw, &review); err != nil {
 		t.Fatal(err)
@@ -101,7 +105,20 @@ func TestPrivateMemoryWiringUsesDistinctConfigAfterPublicPostAndNeverPublishesIt
 	if !ok || json.Unmarshal([]byte(data), &frozen) != nil {
 		t.Fatalf("private payload=%q", review.Input)
 	}
-	if frozen["latestInput"] != "Mara: hello from the stream" || frozen["finalReply"] != "" {
+	if frozen["speaker"] != review.NoteSource.Speaker || frozen["text"] != review.NoteSource.Text || frozen["speaker"] != "Conversation transcript" || len(review.History) != 0 {
+		t.Fatalf("source parity=%+v review=%+v", frozen, review)
+	}
+	var transcript struct {
+		History []json.RawMessage
+		Latest  []struct {
+			Speaker string
+			Text    string
+		}
+	}
+	if err := json.Unmarshal([]byte(frozen["text"]), &transcript); err != nil {
+		t.Fatal(err)
+	}
+	if len(transcript.History) != 0 || len(transcript.Latest) != 1 || transcript.Latest[0].Speaker != "Mara" || transcript.Latest[0].Text != "hello from the stream" {
 		t.Fatalf("frozen=%+v", frozen)
 	}
 	mu.Lock()
@@ -111,5 +128,26 @@ func TestPrivateMemoryWiringUsesDistinctConfigAfterPublicPostAndNeverPublishesIt
 	}
 	if !strings.Contains(logs.String(), "memoryEnabled=true") || strings.Contains(logs.String(), "NEVER PUBLIC") || strings.Contains(logs.String(), "key.secret") {
 		t.Fatalf("logs=%s", logs.String())
+	}
+}
+
+func TestRunRejectsMissingMemoryPolicyBeforeStarting(t *testing.T) {
+	for _, value := range []string{"", "   "} {
+		logs := &lockedBuilder{}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		err := run(ctx, env(map[string]string{
+			"GANGOLF_API_KEY":         "key.secret",
+			"GANGOLF_CHANNELS":        "twitch/stream",
+			"GANGOLF_API_URL":         ":invalid-message-url",
+			"PROCESSOR_URL":           ":invalid-processor-url",
+			"PROCESSOR_MEMORY_CONFIG": value,
+		}), slog.New(slog.NewTextHandler(logs, nil)))
+		cancel()
+		if err == nil || err.Error() != "PROCESSOR_MEMORY_CONFIG is required" {
+			t.Fatalf("err=%v", err)
+		}
+		if logs.String() != "" {
+			t.Fatalf("started with missing memory policy: %s", logs.String())
+		}
 	}
 }

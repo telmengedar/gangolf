@@ -5,16 +5,20 @@ import (
 	"testing"
 )
 
-func TestOptionalMemoryConfigIsDisabledWhenAbsentOrBlank(t *testing.T) {
-	for _, value := range []string{"", "   "} {
-		cfg, err := loadConfig(env(map[string]string{"GANGOLF_API_KEY": "k.s", "GANGOLF_CHANNELS": "twitch/stream", "PROCESSOR_MEMORY_CONFIG": value}))
-		if err != nil || cfg.memoryConfig != 0 {
-			t.Fatalf("config=%+v err=%v", cfg, err)
+func TestMemoryPolicyIsRequiredWhenAbsentOrBlank(t *testing.T) {
+	for _, values := range []map[string]string{
+		{"GANGOLF_API_KEY": "k.s", "GANGOLF_CHANNELS": "twitch/stream"},
+		{"GANGOLF_API_KEY": "k.s", "GANGOLF_CHANNELS": "twitch/stream", "PROCESSOR_MEMORY_CONFIG": ""},
+		{"GANGOLF_API_KEY": "k.s", "GANGOLF_CHANNELS": "twitch/stream", "PROCESSOR_MEMORY_CONFIG": "   "},
+	} {
+		_, err := loadConfig(env(values))
+		if err == nil || err.Error() != "PROCESSOR_MEMORY_CONFIG is required" {
+			t.Fatalf("err=%v", err)
 		}
 	}
 }
 
-func TestOptionalMemoryConfigRequiresPositiveIntegerWithoutEchoingValue(t *testing.T) {
+func TestMemoryPolicyRequiresPositiveIntegerWithoutEchoingValue(t *testing.T) {
 	for _, bad := range []string{"0", "-5", "garbage", "9223372036854775808"} {
 		_, err := loadConfig(env(map[string]string{"GANGOLF_API_KEY": "k.s", "GANGOLF_CHANNELS": "twitch/stream", "PROCESSOR_MEMORY_CONFIG": bad}))
 		if err == nil || err.Error() != "PROCESSOR_MEMORY_CONFIG must be a positive integer" {

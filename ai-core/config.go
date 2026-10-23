@@ -84,13 +84,15 @@ func loadConfig(lookup func(string) (string, bool)) (config, error) {
 		}
 		cfg.processorConfig = processorConfig
 	}
-	if raw := get("PROCESSOR_MEMORY_CONFIG", ""); raw != "" {
-		memoryConfig, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil || memoryConfig <= 0 {
-			return config{}, fmt.Errorf("PROCESSOR_MEMORY_CONFIG must be a positive integer")
-		}
-		cfg.memoryConfig = memoryConfig
+	raw := get("PROCESSOR_MEMORY_CONFIG", "")
+	if raw == "" {
+		return config{}, fmt.Errorf("PROCESSOR_MEMORY_CONFIG is required")
 	}
+	memoryConfig, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || memoryConfig <= 0 {
+		return config{}, fmt.Errorf("PROCESSOR_MEMORY_CONFIG must be a positive integer")
+	}
+	cfg.memoryConfig = memoryConfig
 	cfg.set, cfg.defaulted = set, defaulted
 	return cfg, nil
 }

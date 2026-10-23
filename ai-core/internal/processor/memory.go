@@ -21,11 +21,6 @@ type MemoryResult struct {
 
 const memoryReviewHeader = "Privately review this completed interaction for useful memory under your configured policy. Do not answer the quoted chat.\n===== COMPLETED INTERACTION DATA =====\n"
 
-type completedInteraction struct {
-	LatestInput string `json:"latestInput"`
-	FinalReply  string `json:"finalReply"`
-}
-
 type memoryResponse struct {
 	Decision   *noteDecision `json:"noteDecision"`
 	ModelCalls *int          `json:"modelCalls"`
@@ -37,16 +32,16 @@ type noteDecision struct {
 }
 
 // Review submits speaker evidence and returns only the typed memory receipt.
-func (c *Client) Review(ctx context.Context, input string, history []window.Exchange, _ string) (MemoryResult, error) {
-	data, err := json.Marshal(completedInteraction{LatestInput: input})
+func (c *Client) Review(ctx context.Context, lines []window.Utterance, history []window.Exchange) (MemoryResult, error) {
+	source, err := transcriptEvidence(lines, history)
 	if err != nil {
-		return MemoryResult{}, fmt.Errorf("processor memory: encode interaction: %w", err)
+		return MemoryResult{}, err
 	}
-	sources := make([]window.Exchange, len(history))
-	for i, exchange := range history {
-		sources[i] = window.Exchange{Input: exchange.Input}
+	data, err := json.Marshal(source)
+	if err != nil {
+		return MemoryResult{}, fmt.Errorf("processor memory: encode source: %w", err)
 	}
-	body, err := c.request(ctx, memoryReviewHeader+string(data), sources, "/runs?verbose=true")
+	body, err := c.request(ctx, memoryReviewHeader+string(data), nil, "/runs?verbose=true", source)
 	if err != nil {
 		return MemoryResult{}, err
 	}

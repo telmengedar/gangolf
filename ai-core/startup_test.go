@@ -15,32 +15,34 @@ import (
 
 func TestSetAndDefaultedVariablesAreNamedInOrder(t *testing.T) {
 	cfg, err := loadConfig(env(map[string]string{
-		"GANGOLF_API_KEY":   "k.s",
-		"GANGOLF_CHANNELS":  "twitch/stream",
-		"PROCESSOR_SUBJECT": "42",
-		"PROCESSOR_CONFIG":  "7",
+		"GANGOLF_API_KEY":         "k.s",
+		"PROCESSOR_MEMORY_CONFIG": "88",
+		"GANGOLF_CHANNELS":        "twitch/stream",
+		"PROCESSOR_SUBJECT":       "42",
+		"PROCESSOR_CONFIG":        "7",
 	}))
 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(cfg.set, ",") != "GANGOLF_API_KEY,GANGOLF_CHANNELS,PROCESSOR_SUBJECT,PROCESSOR_CONFIG" {
+	if strings.Join(cfg.set, ",") != "GANGOLF_API_KEY,GANGOLF_CHANNELS,PROCESSOR_SUBJECT,PROCESSOR_CONFIG,PROCESSOR_MEMORY_CONFIG" {
 		t.Fatalf("set = %v", cfg.set)
 	}
-	if strings.Join(cfg.defaulted, ",") != "GANGOLF_API_URL,GANGOLF_BOT_NAME,PROCESSOR_URL,GANGOLF_ROUTES,GANGOLF_MIN_WORDS,PROCESSOR_MEMORY_CONFIG" {
+	if strings.Join(cfg.defaulted, ",") != "GANGOLF_API_URL,GANGOLF_BOT_NAME,PROCESSOR_URL,GANGOLF_ROUTES,GANGOLF_MIN_WORDS" {
 		t.Fatalf("defaulted = %v", cfg.defaulted)
 	}
 }
 
 func TestStartupLogNamesVariablesAndNeverPrintsValues(t *testing.T) {
 	cfg, err := loadConfig(env(map[string]string{
-		"GANGOLF_API_URL":   "https://user:hunter2@example.invalid/api",
-		"GANGOLF_API_KEY":   "keyid.topsecretvalue",
-		"GANGOLF_CHANNELS":  "twitch/privatechannel",
-		"GANGOLF_BOT_NAME":  "Distinctivebot",
-		"PROCESSOR_URL":     "http://internal-host.invalid:8080",
-		"PROCESSOR_SUBJECT": "424242",
-		"PROCESSOR_CONFIG":  "737373",
+		"GANGOLF_API_URL":         "https://user:hunter2@example.invalid/api",
+		"GANGOLF_API_KEY":         "keyid.topsecretvalue",
+		"PROCESSOR_MEMORY_CONFIG": "818181",
+		"GANGOLF_CHANNELS":        "twitch/privatechannel",
+		"GANGOLF_BOT_NAME":        "Distinctivebot",
+		"PROCESSOR_URL":           "http://internal-host.invalid:8080",
+		"PROCESSOR_SUBJECT":       "424242",
+		"PROCESSOR_CONFIG":        "737373",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -50,12 +52,12 @@ func TestStartupLogNamesVariablesAndNeverPrintsValues(t *testing.T) {
 	logStartup(slog.New(slog.NewTextHandler(&logs, nil)), cfg)
 
 	out := logs.String()
-	for _, value := range []string{"hunter2", "topsecretvalue", "privatechannel", "Distinctivebot", "internal-host", "424242", "737373", "example.invalid"} {
+	for _, value := range []string{"hunter2", "topsecretvalue", "privatechannel", "Distinctivebot", "internal-host", "424242", "737373", "818181", "example.invalid"} {
 		if strings.Contains(out, value) {
 			t.Fatalf("startup log printed a configured value %q: %s", value, out)
 		}
 	}
-	for _, name := range []string{"GANGOLF_API_KEY", "GANGOLF_API_URL", "PROCESSOR_SUBJECT", "PROCESSOR_CONFIG"} {
+	for _, name := range []string{"GANGOLF_API_KEY", "GANGOLF_API_URL", "PROCESSOR_SUBJECT", "PROCESSOR_CONFIG", "PROCESSOR_MEMORY_CONFIG"} {
 		if !strings.Contains(out, name) {
 			t.Fatalf("startup log = %s, want the variable name %s", out, name)
 		}
@@ -70,9 +72,10 @@ func TestStartupLogNamesVariablesAndNeverPrintsValues(t *testing.T) {
 
 func TestStartupLogCountsRoutedSourcesWithoutNamingThem(t *testing.T) {
 	cfg, err := loadConfig(env(map[string]string{
-		"GANGOLF_API_KEY":  "k.s",
-		"GANGOLF_CHANNELS": "twitch/privatechannel,localhost/hiddenhost,localhost/secondhidden",
-		"GANGOLF_ROUTES":   "localhost/hiddenhost=*,localhost/secondhidden=twitch/privatechannel",
+		"GANGOLF_API_KEY":         "k.s",
+		"PROCESSOR_MEMORY_CONFIG": "88",
+		"GANGOLF_CHANNELS":        "twitch/privatechannel,localhost/hiddenhost,localhost/secondhidden",
+		"GANGOLF_ROUTES":          "localhost/hiddenhost=*,localhost/secondhidden=twitch/privatechannel",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -177,20 +180,25 @@ func TestEveryConfiguredValueReachesTheWire(t *testing.T) {
 	}))
 	defer apiServer.Close()
 	processorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery == "verbose=true" {
+			io.WriteString(w, `{"noteDecision":{"state":"abstained"},"modelCalls":1}`)
+			return
+		}
 		runs.record(r)
 		io.WriteString(w, `{"reply":"`+botName+`: hello","produced":true}`)
 	}))
 	defer processorServer.Close()
 	values := map[string]string{
-		"GANGOLF_API_URL":   apiServer.URL + apiSegment,
-		"GANGOLF_API_KEY":   apiKey,
-		"GANGOLF_BOT_NAME":  botName,
-		"GANGOLF_CHANNELS":  "wireservice/wirechannel,wiresource/wirehost",
-		"GANGOLF_ROUTES":    "wiresource/wirehost=wireservice/wirechannel",
-		"GANGOLF_MIN_WORDS": "wiresource/wirehost=3",
-		"PROCESSOR_URL":     processorServer.URL,
-		"PROCESSOR_SUBJECT": "42",
-		"PROCESSOR_CONFIG":  "7",
+		"GANGOLF_API_URL":         apiServer.URL + apiSegment,
+		"GANGOLF_API_KEY":         apiKey,
+		"PROCESSOR_MEMORY_CONFIG": "88",
+		"GANGOLF_BOT_NAME":        botName,
+		"GANGOLF_CHANNELS":        "wireservice/wirechannel,wiresource/wirehost",
+		"GANGOLF_ROUTES":          "wiresource/wirehost=wireservice/wirechannel",
+		"GANGOLF_MIN_WORDS":       "wiresource/wirehost=3",
+		"PROCESSOR_URL":           processorServer.URL,
+		"PROCESSOR_SUBJECT":       "42",
+		"PROCESSOR_CONFIG":        "7",
 	}
 	logs := &lockedBuilder{}
 	ctx, cancel := context.WithCancel(context.Background())
