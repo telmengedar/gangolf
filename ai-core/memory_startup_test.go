@@ -113,3 +113,24 @@ func TestPrivateMemoryWiringUsesDistinctConfigAfterPublicPostAndNeverPublishesIt
 		t.Fatalf("logs=%s", logs.String())
 	}
 }
+
+func TestRunRejectsMissingMemoryPolicyBeforeStarting(t *testing.T) {
+	for _, value := range []string{"", "   "} {
+		logs := &lockedBuilder{}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		err := run(ctx, env(map[string]string{
+			"GANGOLF_API_KEY":         "key.secret",
+			"GANGOLF_CHANNELS":        "twitch/stream",
+			"GANGOLF_API_URL":         ":invalid-message-url",
+			"PROCESSOR_URL":           ":invalid-processor-url",
+			"PROCESSOR_MEMORY_CONFIG": value,
+		}), slog.New(slog.NewTextHandler(logs, nil)))
+		cancel()
+		if err == nil || err.Error() != "PROCESSOR_MEMORY_CONFIG is required" {
+			t.Fatalf("err=%v", err)
+		}
+		if logs.String() != "" {
+			t.Fatalf("started with missing memory policy: %s", logs.String())
+		}
+	}
+}

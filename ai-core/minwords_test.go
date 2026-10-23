@@ -6,7 +6,7 @@ import (
 )
 
 func minWordsOf(channels, minimums string) (config, error) {
-	values := map[string]string{"GANGOLF_API_KEY": "k.s", "GANGOLF_CHANNELS": channels}
+	values := map[string]string{"GANGOLF_API_KEY": "k.s", "PROCESSOR_MEMORY_CONFIG": "88", "GANGOLF_CHANNELS": channels}
 	if minimums != "" {
 		values["GANGOLF_MIN_WORDS"] = minimums
 	}
@@ -33,7 +33,7 @@ func TestWithoutMinWordsNoSourceHasAThreshold(t *testing.T) {
 }
 
 func TestBlankMinWordsCountAsUnset(t *testing.T) {
-	cfg, err := loadConfig(env(map[string]string{"GANGOLF_API_KEY": "k.s", "GANGOLF_CHANNELS": "twitch/stream", "GANGOLF_MIN_WORDS": "  "}))
+	cfg, err := loadConfig(env(map[string]string{"GANGOLF_API_KEY": "k.s", "PROCESSOR_MEMORY_CONFIG": "88", "GANGOLF_CHANNELS": "twitch/stream", "GANGOLF_MIN_WORDS": "  "}))
 
 	if err != nil {
 		t.Fatal(err)

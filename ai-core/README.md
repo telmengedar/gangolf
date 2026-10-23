@@ -16,10 +16,10 @@ All configuration is environment variables.
 | `GANGOLF_BOT_NAME` | no | Gangolf's speaker name, default `GangolfBot` |
 | `PROCESSOR_URL` | no | processor base, default `http://gangolf:8080` |
 | `PROCESSOR_SUBJECT` | no | node the processor anchors on, default `1090` |
-| `PROCESSOR_MEMORY_CONFIG` | no | positive config node ID for private memory review; unset or blank disables it; requires a dedicated Processor `note.mode=decision` policy |
+| `PROCESSOR_MEMORY_CONFIG` | yes | positive config node ID for the dedicated private memory policy with Processor `note.mode=decision`; no default; missing or blank fails startup |
 | `PROCESSOR_CONFIG` | no | id of the `processor-config` node sent with every run, default `17607` (Gangolf's config) |
 
-Private memory review runs after a successful public post, using frozen speaker statements with generated assistant replies excluded from its evidence. Its response never reaches chat. One worker has one waiting slot; new jobs are dropped when busy, and each review has a 60-second timeout with no retry. Shutdown cancels active review and discards waiting work. A timeout leaves remote persistence unknown. Review shares model capacity with chat; enabling it requires a compatible Processor and measured memory quality and latency.
+Private memory review runs after a successful public post, using frozen speaker statements with generated assistant replies excluded from its evidence. Its response never reaches chat. One worker has one waiting slot; new jobs are dropped when busy, and each review has a 60-second timeout with no retry. Shutdown cancels active review and discards waiting work. A timeout leaves remote persistence unknown. Every valid deployment starts the memory worker. Review shares model capacity with chat; deployment requires a compatible Processor and measured memory quality and latency.
 
 ## Routing
 
@@ -47,6 +47,8 @@ GANGOLF_ROUTES=localhost/host=*
 - The minimum is at least 1; `1` only stops lines without any word.
 
 ## Build and run
+
+The external environment file must include `PROCESSOR_MEMORY_CONFIG=<dedicated memory policy node ID>` alongside `GANGOLF_API_KEY` and `GANGOLF_CHANNELS`. Provision that policy on the configured Processor before deploying. Use its dedicated policy ID rather than the ordinary chat config ID (`17607` by default). Missing, blank, nonnumeric or nonpositive values and integer overflow fail startup; there is no worker disable setting.
 
 ```
 docker build -t gangolf-ai-core ai-core
