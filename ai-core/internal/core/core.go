@@ -44,28 +44,31 @@ type Runner interface {
 
 // Config carries what the core needs to know about its deployment.
 type Config struct {
-	Routes   map[window.Key][]window.Key
-	MinWords map[window.Key]int
-	BotName  string
-	Interval time.Duration
+	Routes         map[window.Key][]window.Key
+	MinWords       map[window.Key]int
+	BotName        string
+	Interval       time.Duration
+	MemoryReviewer MemoryReviewer
 }
 
 // Core polls, windows, runs and posts.
 type Core struct {
-	routes     map[window.Key][]window.Key
-	minWords   map[window.Key]int
-	interval   time.Duration
-	windows    *window.Windows
-	messages   Messages
-	runner     Runner
-	log        *slog.Logger
-	now        func() time.Time
-	labels     []string
-	cursor     time.Time
-	fallback   time.Time
-	unlisted   map[window.Key]bool
-	closing    map[window.Key]bool
-	violations map[window.Key][]time.Time
+	routes         map[window.Key][]window.Key
+	minWords       map[window.Key]int
+	interval       time.Duration
+	windows        *window.Windows
+	messages       Messages
+	runner         Runner
+	log            *slog.Logger
+	now            func() time.Time
+	labels         []string
+	cursor         time.Time
+	fallback       time.Time
+	unlisted       map[window.Key]bool
+	closing        map[window.Key]bool
+	violations     map[window.Key][]time.Time
+	memoryReviewer MemoryReviewer
+	memoryJobs     chan memoryJob
 }
 
 // New returns a core wired to its two collaborators; now supplies the clock.
@@ -74,23 +77,38 @@ func New(cfg Config, messages Messages, runner Runner, log *slog.Logger, now fun
 		cfg.Interval = PollInterval
 	}
 	return &Core{
-		unlisted:   make(map[window.Key]bool),
-		closing:    make(map[window.Key]bool),
-		violations: make(map[window.Key][]time.Time),
-		routes:     cfg.Routes,
-		minWords:   cfg.MinWords,
-		interval:   cfg.Interval,
-		labels:     []string{cfg.BotName, personaName},
-		windows:    window.New(cfg.BotName),
-		messages:   messages,
-		runner:     runner,
-		log:        log,
-		now:        now,
+		unlisted:       make(map[window.Key]bool),
+		closing:        make(map[window.Key]bool),
+		violations:     make(map[window.Key][]time.Time),
+		memoryReviewer: cfg.MemoryReviewer,
+		routes:         cfg.Routes,
+		minWords:       cfg.MinWords,
+		interval:       cfg.Interval,
+		labels:         []string{cfg.BotName, personaName},
+		windows:        window.New(cfg.BotName),
+		messages:       messages,
+		runner:         runner,
+		log:            log,
+		now:            now,
 	}
 }
 
 // Run bootstraps, retrying until it succeeds, and then ticks until the context ends.
 func (c *Core) Run(ctx context.Context) {
+	if c.memoryReviewer != nil {
+		workerCtx, cancel := context.WithCancel(ctx)
+		c.memoryJobs = make(chan memoryJob, 1)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			c.reviewMemory(workerCtx)
+		}()
+		defer func() {
+			cancel()
+			<-done
+			c.memoryJobs = nil
+		}()
+	}
 	for {
 		err := c.Bootstrap(ctx)
 		if err == nil {
@@ -233,7 +251,9 @@ func (c *Core) turn(ctx context.Context, key window.Key) bool {
 	}
 	if err := c.messages.Post(ctx, key, text); err != nil {
 		c.log.Error("post failed", "channel", key.Channel, "error", err.Error())
+		return true
 	}
+	c.offerMemory(ctx, key, batch, text)
 	return true
 }
 

@@ -27,7 +27,7 @@ func TestSetAndDefaultedVariablesAreNamedInOrder(t *testing.T) {
 	if strings.Join(cfg.set, ",") != "GANGOLF_API_KEY,GANGOLF_CHANNELS,PROCESSOR_SUBJECT,PROCESSOR_CONFIG" {
 		t.Fatalf("set = %v", cfg.set)
 	}
-	if strings.Join(cfg.defaulted, ",") != "GANGOLF_API_URL,GANGOLF_BOT_NAME,PROCESSOR_URL,GANGOLF_ROUTES,GANGOLF_MIN_WORDS" {
+	if strings.Join(cfg.defaulted, ",") != "GANGOLF_API_URL,GANGOLF_BOT_NAME,PROCESSOR_URL,GANGOLF_ROUTES,GANGOLF_MIN_WORDS,PROCESSOR_MEMORY_CONFIG" {
 		t.Fatalf("defaulted = %v", cfg.defaulted)
 	}
 }
