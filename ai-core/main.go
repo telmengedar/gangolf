@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,7 +15,7 @@ import (
 )
 
 func logStartup(log *slog.Logger, cfg config) {
-	log.Info("starting", "set", cfg.set, "defaulted", cfg.defaulted, "channels", len(cfg.channels), "routed", cfg.routed())
+	log.Info("starting", "set", cfg.set, "defaulted", cfg.defaulted, "channels", len(cfg.channels), "routed", cfg.routed(), "memoryEnabled", cfg.memoryConfig > 0)
 }
 
 func run(ctx context.Context, lookup func(string) (string, bool), log *slog.Logger) error {
@@ -26,10 +27,15 @@ func run(ctx context.Context, lookup func(string) (string, bool), log *slog.Logg
 
 	messageClient := messages.New(cfg.apiURL, cfg.apiKey, cfg.botName, nil, log)
 	processorClient := processor.New(cfg.processorURL, cfg.subject, cfg.processorConfig, nil)
+	var reviewer core.MemoryReviewer
+	if cfg.memoryConfig > 0 {
+		reviewer = processor.New(cfg.processorURL, cfg.subject, cfg.memoryConfig, &http.Client{Timeout: processor.MemoryReviewTimeout})
+	}
 	core.New(core.Config{
-		Routes:   cfg.routes,
-		MinWords: cfg.minWords,
-		BotName:  cfg.botName,
+		MemoryReviewer: reviewer,
+		Routes:         cfg.routes,
+		MinWords:       cfg.minWords,
+		BotName:        cfg.botName,
 	}, messageClient, processorClient, log, time.Now).Run(ctx)
 	return nil
 }

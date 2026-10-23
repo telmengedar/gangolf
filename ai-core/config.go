@@ -29,6 +29,7 @@ type config struct {
 	processorURL    string
 	subject         int64
 	processorConfig int64
+	memoryConfig    int64
 	set             []string
 	defaulted       []string
 }
@@ -82,6 +83,13 @@ func loadConfig(lookup func(string) (string, bool)) (config, error) {
 			return config{}, fmt.Errorf("PROCESSOR_CONFIG must be a positive integer")
 		}
 		cfg.processorConfig = processorConfig
+	}
+	if raw := get("PROCESSOR_MEMORY_CONFIG", ""); raw != "" {
+		memoryConfig, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || memoryConfig <= 0 {
+			return config{}, fmt.Errorf("PROCESSOR_MEMORY_CONFIG must be a positive integer")
+		}
+		cfg.memoryConfig = memoryConfig
 	}
 	cfg.set, cfg.defaulted = set, defaulted
 	return cfg, nil

@@ -69,30 +69,9 @@ type errorEnvelope struct {
 
 // Run asks processor to answer input given the earlier conversation.
 func (c *Client) Run(ctx context.Context, input string, history []window.Exchange) (Result, error) {
-	exchanges := make([]wireExchange, len(history))
-	for i, exchange := range history {
-		exchanges[i] = wireExchange{Input: exchange.Input, Reply: exchange.Reply}
-	}
-	encoded, err := json.Marshal(runRequest{Input: input, Subject: c.subject, Config: c.config, History: exchanges})
+	body, err := c.request(ctx, input, history, "/runs")
 	if err != nil {
-		return Result{}, fmt.Errorf("processor run: %w", err)
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/runs", bytes.NewReader(encoded))
-	if err != nil {
-		return Result{}, fmt.Errorf("processor run: %w", err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := c.http.Do(request)
-	if err != nil {
-		return Result{}, fmt.Errorf("processor run: %w", err)
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		return Result{}, fmt.Errorf("processor run: read response: %w", err)
-	}
-	if response.StatusCode != http.StatusOK {
-		return Result{}, failure(response.StatusCode, body)
+		return Result{}, err
 	}
 	var decoded runResponse
 	if err := json.Unmarshal(body, &decoded); err != nil {
@@ -102,6 +81,35 @@ func (c *Client) Run(ctx context.Context, input string, history []window.Exchang
 	failed := !chosen && decoded.Produced != nil && !*decoded.Produced
 	silent := chosen || failed || strings.TrimSpace(decoded.Reply) == ""
 	return Result{Reply: decoded.Reply, Silent: silent, Chosen: chosen, Failed: failed}, nil
+}
+
+func (c *Client) request(ctx context.Context, input string, history []window.Exchange, path string) ([]byte, error) {
+	exchanges := make([]wireExchange, len(history))
+	for i, exchange := range history {
+		exchanges[i] = wireExchange{Input: exchange.Input, Reply: exchange.Reply}
+	}
+	encoded, err := json.Marshal(runRequest{Input: input, Subject: c.subject, Config: c.config, History: exchanges})
+	if err != nil {
+		return nil, fmt.Errorf("processor run: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, bytes.NewReader(encoded))
+	if err != nil {
+		return nil, fmt.Errorf("processor run: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.http.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("processor run: %w", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, fmt.Errorf("processor run: read response: %w", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		return nil, failure(response.StatusCode, body)
+	}
+	return body, nil
 }
 
 func failure(status int, body []byte) error {
