@@ -19,7 +19,7 @@ All configuration is environment variables.
 | `PROCESSOR_MEMORY_CONFIG` | no | positive config node ID for private memory review; unset or blank disables it; requires a dedicated Processor `note.mode=decision` policy |
 | `PROCESSOR_CONFIG` | no | id of the `processor-config` node sent with every run, default `17607` (Gangolf's config) |
 
-Private memory review runs after a successful public post, using the frozen conversation and accepted reply. Its response never reaches chat. One worker has one waiting slot; new jobs are dropped when busy, and each review has a 60-second timeout with no retry. Shutdown cancels active review and discards waiting work. A timeout leaves remote persistence unknown. Review shares model capacity with chat; enabling it requires a compatible Processor and measured memory quality and latency.
+Private memory review runs after a successful public post, using frozen speaker statements with generated assistant replies excluded from its evidence. Its response never reaches chat. One worker has one waiting slot; new jobs are dropped when busy, and each review has a 60-second timeout with no retry. Shutdown cancels active review and discards waiting work. A timeout leaves remote persistence unknown. Review shares model capacity with chat; enabling it requires a compatible Processor and measured memory quality and latency.
 
 ## Routing
 

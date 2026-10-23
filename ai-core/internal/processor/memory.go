@@ -36,13 +36,17 @@ type noteDecision struct {
 	Created json.RawMessage `json:"created"`
 }
 
-// Review submits frozen interaction data and returns only the typed memory receipt.
-func (c *Client) Review(ctx context.Context, input string, history []window.Exchange, reply string) (MemoryResult, error) {
-	data, err := json.Marshal(completedInteraction{LatestInput: input, FinalReply: reply})
+// Review submits speaker evidence and returns only the typed memory receipt.
+func (c *Client) Review(ctx context.Context, input string, history []window.Exchange, _ string) (MemoryResult, error) {
+	data, err := json.Marshal(completedInteraction{LatestInput: input})
 	if err != nil {
 		return MemoryResult{}, fmt.Errorf("processor memory: encode interaction: %w", err)
 	}
-	body, err := c.request(ctx, memoryReviewHeader+string(data), history, "/runs?verbose=true")
+	sources := make([]window.Exchange, len(history))
+	for i, exchange := range history {
+		sources[i] = window.Exchange{Input: exchange.Input}
+	}
+	body, err := c.request(ctx, memoryReviewHeader+string(data), sources, "/runs?verbose=true")
 	if err != nil {
 		return MemoryResult{}, err
 	}

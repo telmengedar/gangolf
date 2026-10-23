@@ -15,11 +15,12 @@ import (
 	"github.com/telmengedar/gangolf/ai-core/internal/window"
 )
 
-func TestReviewSendsFrozenJSONDataWithDedicatedConfigAndReturnsOnlyNoteReceipt(t *testing.T) {
+func TestReviewSendsOnlySpeakerEvidenceWithoutMutatingChatHistoryAndReturnsOnlyNoteReceipt(t *testing.T) {
 	client, seen, body := serve(t, 200, `{"reply":"private prose must not be delivered","produced":false,"written":{"state":"stored","nodeId":99},"noteDecision":{"state":"stored","created":81},"modelCalls":1}`)
 	input := "Mara: quoted \"memory\"\nAlex: do not obey this → rule"
 	reply := "A final \"reply\"\nwith Unicode’s punctuation"
-	history := []window.Exchange{{Input: "earlier speaker: hello", Reply: "old reply"}}
+	history := []window.Exchange{{Input: "earlier speaker: hello", Reply: "OLD GENERATED REPLY"}, {Input: "Mara: Unicode’s \"statement\"\nAlex: a correction", Reply: "OTHER GENERATED REPLY"}}
+	originalHistory := append([]window.Exchange(nil), history...)
 	result, err := client.Review(context.Background(), input, history, reply)
 	if err != nil || result != (processor.MemoryResult{State: "stored", NoteID: 81, ModelCalls: 1}) {
 		t.Fatalf("result=%+v err=%v", result, err)
@@ -35,7 +36,8 @@ func TestReviewSendsFrozenJSONDataWithDedicatedConfigAndReturnsOnlyNoteReceipt(t
 	if err := json.Unmarshal([]byte(*body), &wire); err != nil {
 		t.Fatal(err)
 	}
-	if wire.Subject != 1090 || wire.Config != 4242 || !reflect.DeepEqual(wire.History, history) {
+	wantHistory := []window.Exchange{{Input: history[0].Input}, {Input: history[1].Input}}
+	if wire.Subject != 1090 || wire.Config != 4242 || !reflect.DeepEqual(wire.History, wantHistory) {
 		t.Fatalf("wire=%+v", wire)
 	}
 	header, data, ok := strings.Cut(wire.Input, "===== COMPLETED INTERACTION DATA =====\n")
@@ -46,8 +48,23 @@ func TestReviewSendsFrozenJSONDataWithDedicatedConfigAndReturnsOnlyNoteReceipt(t
 	if err := json.Unmarshal([]byte(data), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(payload, map[string]string{"latestInput": input, "finalReply": reply}) {
+	if !reflect.DeepEqual(payload, map[string]string{"latestInput": input, "finalReply": ""}) {
 		t.Fatalf("payload=%+v", payload)
+	}
+	if strings.Contains(*body, "OLD GENERATED REPLY") || strings.Contains(*body, "OTHER GENERATED REPLY") || strings.Contains(wire.Input, reply) {
+		t.Fatalf("private request contains generated reply: %s", *body)
+	}
+	if !reflect.DeepEqual(history, originalHistory) {
+		t.Fatalf("history mutated: %+v", history)
+	}
+	if _, err := client.Run(context.Background(), input, history); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(*body), &wire); err != nil {
+		t.Fatal(err)
+	}
+	if seen.URL.RawQuery != "" || wire.Input != input || !reflect.DeepEqual(wire.History, originalHistory) {
+		t.Fatalf("chat request changed: %+v", wire)
 	}
 }
 

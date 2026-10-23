@@ -101,7 +101,7 @@ func TestPrivateMemoryWiringUsesDistinctConfigAfterPublicPostAndNeverPublishesIt
 	if !ok || json.Unmarshal([]byte(data), &frozen) != nil {
 		t.Fatalf("private payload=%q", review.Input)
 	}
-	if frozen["latestInput"] != "Mara: hello from the stream" || frozen["finalReply"] != "accepted public reply" {
+	if frozen["latestInput"] != "Mara: hello from the stream" || frozen["finalReply"] != "" {
 		t.Fatalf("frozen=%+v", frozen)
 	}
 	mu.Lock()
