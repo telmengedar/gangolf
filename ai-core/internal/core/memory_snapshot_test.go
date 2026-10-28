@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -68,16 +67,11 @@ func TestMemoryJobFreezesTrustedUtterancesAndHistoryBeforeDispatch(t *testing.T)
 	if err := json.Unmarshal(raw, &request); err != nil {
 		t.Fatal(err)
 	}
-	_, data, ok := strings.Cut(request.Input, "===== COMPLETED INTERACTION DATA =====\n")
-	var modelSource struct{ Speaker, Text string }
-	if !ok || json.Unmarshal([]byte(data), &modelSource) != nil {
-		t.Fatalf("model source missing: %s", request.Input)
-	}
-	if modelSource != request.NoteSource || modelSource.Speaker != "Conversation transcript" {
-		t.Fatalf("source mismatch: model=%+v carrier=%+v", modelSource, request.NoteSource)
+	if request.Input != request.NoteSource.Text || request.NoteSource.Speaker != "Conversation transcript" {
+		t.Fatalf("source mismatch: input=%q carrier=%+v", request.Input, request.NoteSource)
 	}
 	want := `{"history":[{"input":"Mara: earlier source"}],"latest":[{"speaker":"Sora","text":"I keep locally adapted seeds."}]}`
-	if modelSource.Text != want {
-		t.Fatalf("source changed after offer: got %s want %s", modelSource.Text, want)
+	if request.NoteSource.Text != want {
+		t.Fatalf("source changed after offer: got %s want %s", request.NoteSource.Text, want)
 	}
 }
