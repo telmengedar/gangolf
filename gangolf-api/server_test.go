@@ -338,6 +338,57 @@ func TestInvalidBatchAndPostToNeverPublish(t *testing.T) {
 	}
 }
 
+func TestMissingAuthorServiceFieldsNeverPublish(t *testing.T) {
+	for _, field := range []string{`"service":"microphone",`, `"serviceId":"speaker-1",`} {
+		t.Run(field, func(t *testing.T) {
+			f, s := newFixture(t)
+			body := "[" + strings.Replace(testMessage, field, "", 1) + "]"
+			var messages []message
+			if err := json.Unmarshal([]byte(body), &messages); err != nil {
+				t.Fatal(err)
+			}
+			if len(messages) != 1 || messages[0].User.Service != "" && messages[0].User.ServiceID != "" {
+				t.Fatal("author service field was not removed")
+			}
+			status(t, request(t, s, "POST", "/api/v2/messages", "key.secret", body), 400)
+			if f.writes != 0 || len(f.nodes) != 0 {
+				t.Fatal("invalid author reached storage mutation")
+			}
+		})
+	}
+}
+
+func TestListRejectsBatchWithoutPrivateAccess(t *testing.T) {
+	for _, access := range []*int{nil, intPointer(1)} {
+		name := "missing-access"
+		if access != nil {
+			name = "public-access"
+		}
+		t.Run(name, func(t *testing.T) {
+			f, s := newFixture(t)
+			status(t, request(t, s, "POST", "/api/v2/messages", "key.secret", "["+testMessage+"]"), 201)
+			w := request(t, s, "GET", "/api/v2/messages", "key.secret", "")
+			status(t, w, 200)
+			if !strings.Contains(w.Body.String(), "Distinct Speaker") {
+				t.Fatal("private batch was not readable")
+			}
+			f.mu.Lock()
+			if len(f.nodes) != 1 || f.nodes[0].Content == nil || f.nodes[0].Access == nil || *f.nodes[0].Access != 0 {
+				f.mu.Unlock()
+				t.Fatal("private batch was not published")
+			}
+			f.nodes[0].Access = access
+			f.mu.Unlock()
+			w = request(t, s, "GET", "/api/v2/messages", "key.secret", "")
+			status(t, w, 500)
+			var failure map[string]string
+			if json.Unmarshal(w.Body.Bytes(), &failure) != nil || failure["code"] != "corrupt_storage" || strings.Contains(w.Body.String(), "Distinct Speaker") {
+				t.Fatalf("batch access failure was not sanitized: %s", w.Body.String())
+			}
+		})
+	}
+}
+
 func TestBatchIsInvisibleUntilCompleteContentUpload(t *testing.T) {
 	for _, step := range []string{"create", "link", "upload"} {
 		t.Run(step, func(t *testing.T) {
@@ -535,6 +586,39 @@ func TestJWTRequiresSignatureIssuerAudienceLifetimeAndGraphGrant(t *testing.T) {
 			}
 			if f.writes != 0 {
 				t.Fatal("GET wrote graph")
+			}
+		})
+	}
+}
+
+func TestJWTLifetimeOrderingIsEnforcedWithinClockSkew(t *testing.T) {
+	private, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name        string
+		nbf, expiry time.Duration
+		want        int
+	}{
+		{"inverted", time.Minute, -time.Minute, 401},
+		{"valid-skew", time.Minute, 90 * time.Second, 201},
+		{"equal-future", time.Minute, time.Minute, 201},
+		{"equal-past", -time.Minute, -time.Minute, 201},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f, s := newFixture(t)
+			f.jwks = []byte(fmt.Sprintf(`{"keys":[{"kty":"RSA","kid":"test-key","alg":"RS256","use":"sig","n":"%s","e":"%s"}]}`, base64.RawURLEncoding.EncodeToString(private.N.Bytes()), base64.RawURLEncoding.EncodeToString(big.NewInt(int64(private.E)).Bytes())))
+			claims := jwt.MapClaims{"iss": f.cfg.Issuer, "aud": f.cfg.Audience, "userId": "7", "nbf": s.now().Add(tt.nbf).Unix(), "exp": s.now().Add(tt.expiry).Unix()}
+			token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+			token.Header["kid"] = "test-key"
+			encoded, err := token.SignedString(private)
+			if err != nil {
+				t.Fatal(err)
+			}
+			status(t, request(t, s, "POST", "/api/v2/messages", encoded, "["+testMessage+"]"), tt.want)
+			if tt.want == 401 && (f.writes != 0 || len(f.nodes) != 0) {
+				t.Fatal("invalid lifetime reached storage mutation")
 			}
 		})
 	}

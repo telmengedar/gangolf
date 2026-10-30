@@ -97,6 +97,11 @@ func (s *server) authorize(ctx context.Context, r *http.Request, c *authConfig, 
 			}
 			return http.StatusUnauthorized
 		}
+		notBefore, _ := claims.GetNotBefore()
+		expires, _ := claims.GetExpirationTime()
+		if notBefore != nil && notBefore.After(expires.Time) {
+			return http.StatusUnauthorized
+		}
 		id, ok := claims[c.UserIDClaim].(string)
 		if !ok {
 			return http.StatusForbidden
