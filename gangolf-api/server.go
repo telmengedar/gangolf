@@ -196,7 +196,12 @@ func parseFilter(q url.Values) (filter, error) {
 }
 
 func (s *server) get(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-	f, err := parseFilter(r.URL.Query())
+	q, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		failure(w, 400, "invalid_filter")
+		return
+	}
+	f, err := parseFilter(q)
 	if err != nil {
 		failure(w, 400, "invalid_filter")
 		return

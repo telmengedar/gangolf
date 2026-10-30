@@ -102,8 +102,13 @@ func (s *server) authorize(ctx context.Context, r *http.Request, c *authConfig, 
 		if notBefore != nil && notBefore.After(expires.Time) {
 			return http.StatusUnauthorized
 		}
-		id, ok := claims[c.UserIDClaim].(string)
-		if !ok {
+		var id string
+		switch value := claims[c.UserIDClaim].(type) {
+		case string:
+			id = value
+		case json.Number:
+			id = value.String()
+		default:
 			return http.StatusForbidden
 		}
 		n, err := strconv.ParseInt(id, 10, 64)
