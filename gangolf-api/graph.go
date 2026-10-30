@@ -26,12 +26,20 @@ type graph struct {
 }
 
 type node struct {
-	ID          int64   `json:"id"`
-	Type        string  `json:"type"`
-	Root        int64   `json:"rootNodeId"`
-	Access      *int    `json:"access"`
-	Content     *string `json:"content"`
-	ContentType string  `json:"contentType"`
+	ID          int64           `json:"id"`
+	Type        string          `json:"type"`
+	Root        int64           `json:"rootNodeId"`
+	Access      json.RawMessage `json:"access"`
+	Content     *string         `json:"content"`
+	ContentType string          `json:"contentType"`
+}
+
+func (n node) privateAccess() bool {
+	if bytes.Equal(bytes.TrimSpace(n.Access), []byte("0")) {
+		return true
+	}
+	var name string
+	return json.Unmarshal(n.Access, &name) == nil && name == "None"
 }
 
 type graphPage struct {
@@ -71,7 +79,7 @@ func (g *graph) loadConfig(ctx context.Context) (*authConfig, error) {
 		return nil, err
 	}
 	var n node
-	if json.Unmarshal(data, &n) != nil || n.ID != g.config || n.Root != g.root || (n.Access == nil || *n.Access != 0) {
+	if json.Unmarshal(data, &n) != nil || n.ID != g.config || n.Root != g.root || !n.privateAccess() {
 		return nil, errCorrupt
 	}
 	data, err = g.request(ctx, http.MethodGet, "/nodes/"+strconv.FormatInt(g.config, 10)+"/content", nil, nil)
@@ -93,7 +101,7 @@ func (g *graph) append(ctx context.Context, messages []message) (int64, error) {
 		return 0, err
 	}
 	var created node
-	if json.Unmarshal(data, &created) != nil || created.ID <= 0 || created.Root != g.root || (created.Access == nil || *created.Access != 0) || created.Type != batchType {
+	if json.Unmarshal(data, &created) != nil || created.ID <= 0 || created.Root != g.root || !created.privateAccess() || created.Type != batchType {
 		return 0, errCorrupt
 	}
 	path := "/nodes/" + strconv.FormatInt(created.ID, 10)
@@ -122,7 +130,7 @@ func (g *graph) list(ctx context.Context) ([]storedMessage, error) {
 			return nil, errCorrupt
 		}
 		for _, n := range page.Result {
-			if n.ID <= lastID || n.Root != g.root || n.Type != batchType || (n.Access == nil || *n.Access != 0) {
+			if n.ID <= lastID || n.Root != g.root || n.Type != batchType || !n.privateAccess() {
 				return nil, errCorrupt
 			}
 			lastID = n.ID

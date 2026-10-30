@@ -77,7 +77,7 @@ func (f *graphFixture) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/api/nodes/12" {
-		respond(w, 200, node{ID: 12, Root: 10, Access: intPointer(0)})
+		respond(w, 200, map[string]any{"id": 12, "rootNodeId": 10, "access": "None"})
 		return
 	}
 	if r.URL.Path == "/api/nodes/12/content" {
@@ -104,7 +104,7 @@ func (f *graphFixture) serve(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(400)
 			return
 		}
-		n := node{ID: int64(100 + len(f.nodes)), Type: batchType, Root: 10, Access: intPointer(0)}
+		n := node{ID: int64(100 + len(f.nodes)), Type: batchType, Root: 10, Access: json.RawMessage(`"None"`)}
 		f.nodes = append(f.nodes, n)
 		respond(w, 200, n)
 		return
@@ -359,7 +359,7 @@ func TestMissingAuthorServiceFieldsNeverPublish(t *testing.T) {
 }
 
 func TestListRejectsBatchWithoutPrivateAccess(t *testing.T) {
-	for _, access := range []*int{nil, intPointer(1)} {
+	for _, access := range []json.RawMessage{nil, json.RawMessage(`"Read"`)} {
 		name := "missing-access"
 		if access != nil {
 			name = "public-access"
@@ -373,7 +373,7 @@ func TestListRejectsBatchWithoutPrivateAccess(t *testing.T) {
 				t.Fatal("private batch was not readable")
 			}
 			f.mu.Lock()
-			if len(f.nodes) != 1 || f.nodes[0].Content == nil || f.nodes[0].Access == nil || *f.nodes[0].Access != 0 {
+			if len(f.nodes) != 1 || f.nodes[0].Content == nil || string(f.nodes[0].Access) != `"None"` {
 				f.mu.Unlock()
 				t.Fatal("private batch was not published")
 			}
@@ -472,7 +472,7 @@ func TestListFiltersBoundariesStableOrderAndEveryGraphPage(t *testing.T) {
 		}
 		payload, _ := json.Marshal(batch{SchemaVersion: 1, Messages: []message{m}})
 		body := string(payload)
-		f.nodes = append(f.nodes, node{ID: int64(100 + i), Type: batchType, Root: 10, Access: intPointer(0), Content: &body, ContentType: "application/json"})
+		f.nodes = append(f.nodes, node{ID: int64(100 + i), Type: batchType, Root: 10, Access: json.RawMessage(`"None"`), Content: &body, ContentType: "application/json"})
 	}
 	tests := []struct {
 		query string
