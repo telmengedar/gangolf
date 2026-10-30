@@ -33,6 +33,7 @@ type keyGrant struct {
 }
 
 type authConfig struct {
+	serviceOwner  int64
 	SchemaVersion int                 `json:"schemaVersion"`
 	Issuer        string              `json:"issuer"`
 	Audience      string              `json:"audience"`

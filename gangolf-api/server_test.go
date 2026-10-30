@@ -76,8 +76,20 @@ func (f *graphFixture) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(503)
 		return
 	}
+	if r.URL.Path == "/api/users/me" {
+		respond(w, 200, map[string]any{"id": 20, "enabled": true, "permissions": []string{"write"}})
+		return
+	}
+	if r.URL.Path == "/api/nodes/10" || r.URL.Path == "/api/nodes/11" {
+		id := int64(10)
+		if r.URL.Path == "/api/nodes/11" {
+			id = 11
+		}
+		respond(w, 200, node{ID: id, Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)})
+		return
+	}
 	if r.URL.Path == "/api/nodes/12" {
-		respond(w, 200, map[string]any{"id": 12, "rootNodeId": 10, "access": "None"})
+		respond(w, 200, map[string]any{"id": 12, "rootNodeId": 10, "ownerId": 20, "access": "None"})
 		return
 	}
 	if r.URL.Path == "/api/nodes/12/content" {

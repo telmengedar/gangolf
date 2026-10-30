@@ -27,6 +27,9 @@ type graph struct {
 
 type node struct {
 	ID          int64           `json:"id"`
+	Name        string          `json:"name"`
+	Owner       int64           `json:"ownerId"`
+	Links       []relation      `json:"linkDetails"`
 	Type        string          `json:"type"`
 	Root        int64           `json:"rootNodeId"`
 	Access      json.RawMessage `json:"access"`
@@ -74,12 +77,19 @@ func (g *graph) request(ctx context.Context, method, path string, query url.Valu
 }
 
 func (g *graph) loadConfig(ctx context.Context) (*authConfig, error) {
+	owner, err := g.serviceIdentity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := g.privateContainers(ctx, owner); err != nil {
+		return nil, err
+	}
 	data, err := g.request(ctx, http.MethodGet, "/nodes/"+strconv.FormatInt(g.config, 10), nil, nil)
 	if err != nil {
 		return nil, err
 	}
 	var n node
-	if json.Unmarshal(data, &n) != nil || n.ID != g.config || n.Root != g.root || !n.privateAccess() {
+	if json.Unmarshal(data, &n) != nil || n.ID != g.config || !g.privateNode(n, owner) {
 		return nil, errCorrupt
 	}
 	data, err = g.request(ctx, http.MethodGet, "/nodes/"+strconv.FormatInt(g.config, 10)+"/content", nil, nil)
@@ -90,6 +100,7 @@ func (g *graph) loadConfig(ctx context.Context) (*authConfig, error) {
 	if json.Unmarshal(data, &cfg) != nil || !cfg.valid() {
 		return nil, errCorrupt
 	}
+	cfg.serviceOwner = owner
 	return &cfg, nil
 }
 

@@ -61,6 +61,10 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path != "/api/v2/messages" {
+		if r.URL.Path == "/api/v3/messages" || strings.HasPrefix(r.URL.Path, "/api/v3/messages/") {
+			s.v3(ctx, w, r)
+			return
+		}
 		failure(w, 404, "not_found")
 		return
 	}
