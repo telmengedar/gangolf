@@ -58,9 +58,17 @@ func TestGraph_PrivateAccessWireMetadata_EnforcesExplicitPrivateValues(t *testin
 				host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.Header().Set("Content-Type", "application/json")
 					switch {
+					case r.URL.Path == "/users/me":
+						respond(w, 200, map[string]any{"id": 20, "enabled": true, "permissions": []string{"write"}})
+					case r.URL.Path == "/nodes/10" || r.URL.Path == "/nodes/11":
+						id := int64(10)
+						if r.URL.Path == "/nodes/11" {
+							id = 11
+						}
+						respond(w, 200, node{ID: id, Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)})
 					case r.Method == "GET" && r.URL.Path == "/nodes/12":
 						metadataReads++
-						fmt.Fprintf(w, `{"id":12,"rootNodeId":10%s}`, tc.field)
+						fmt.Fprintf(w, `{"id":12,"rootNodeId":10,"ownerId":20%s}`, tc.field)
 					case r.Method == "GET" && r.URL.Path == "/nodes/12/content":
 						contentReads++
 						respond(w, 200, f.cfg)
