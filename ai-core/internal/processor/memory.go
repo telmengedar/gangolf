@@ -19,8 +19,6 @@ type MemoryResult struct {
 	ModelCalls int
 }
 
-const memoryReviewHeader = "Privately review this completed interaction for useful memory under your configured policy. Do not answer the quoted chat.\n===== COMPLETED INTERACTION DATA =====\n"
-
 type memoryResponse struct {
 	Decision   *noteDecision `json:"noteDecision"`
 	ModelCalls *int          `json:"modelCalls"`
@@ -37,11 +35,7 @@ func (c *Client) Review(ctx context.Context, lines []window.Utterance, history [
 	if err != nil {
 		return MemoryResult{}, err
 	}
-	data, err := json.Marshal(source)
-	if err != nil {
-		return MemoryResult{}, fmt.Errorf("processor memory: encode source: %w", err)
-	}
-	body, err := c.request(ctx, memoryReviewHeader+string(data), nil, "/runs?verbose=true", source)
+	body, err := c.request(ctx, source.Text, nil, "/runs?verbose=true", source)
 	if err != nil {
 		return MemoryResult{}, err
 	}
