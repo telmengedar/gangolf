@@ -115,13 +115,25 @@ func (f *resourceFixture) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		q := r.URL.Query()
-		if q.Get("rootNodeId") != "10" || !strings.Contains(q.Get("fields"), "ownerId") || !strings.Contains(q.Get("fields"), "linkDetails") {
+		if !strings.Contains(q.Get("fields"), "ownerId") || !strings.Contains(q.Get("fields"), "linkDetails") {
 			w.WriteHeader(400)
 			return
 		}
+		root, _ := strconv.ParseInt(q.Get("rootNodeId"), 10, 64)
 		rows := make([]node, 0)
+		nameValues := q["name"]
+		if len(nameValues) == 1 {
+			nameValues = strings.Split(nameValues[0], ",")
+		}
 		for _, n := range f.nodes {
-			if n.Root != 10 || n.Type != q.Get("type") || q.Get("id") != "" && strconv.FormatInt(n.ID, 10) != q.Get("id") || q.Get("name") != "" && n.Name != q.Get("name") {
+			nameMatches := len(nameValues) == 0
+			for _, name := range nameValues {
+				if n.Name == name {
+					nameMatches = true
+					break
+				}
+			}
+			if q.Get("rootNodeId") != "" && n.Root != root || q.Get("type") != "" && n.Type != q.Get("type") || q.Get("id") != "" && strconv.FormatInt(n.ID, 10) != q.Get("id") || !nameMatches {
 				continue
 			}
 			if q.Get("linkedto") != "" {

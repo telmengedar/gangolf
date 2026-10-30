@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
@@ -181,6 +182,73 @@ func TestV3_ResolveIdentity_ExactKeysReuseFirstNameAndRecoverEmptyContent(t *tes
 		if n.Owner != 20 || !n.privateAccess() || n.Root != 10 {
 			t.Fatal("private metadata")
 		}
+	}
+}
+
+func TestV3_ResolveIdentity_CommaKeysReuseThroughNameArrayBinding(t *testing.T) {
+	f, s := newResourceFixture(t)
+	body := strings.Replace(v3Message, "twitch", "twitch,discord", 1)
+	body = strings.Replace(body, "speaker-7", "speaker, seven", 1)
+	body = strings.Replace(body, "room-42", "room,42", 1)
+	a := createResource(t, s, body)
+	b := createResource(t, s, body)
+	if a.UserID != b.UserID || a.ChannelID != b.ChannelID || len(f.nodes) != 4 {
+		t.Fatalf("identity tuples were allocated twice: a=%+v b=%+v nodes=%d", a, b, len(f.nodes))
+	}
+	for _, kindKey := range []struct{ kind, service, key string }{{"user", "twitch,discord", "speaker, seven"}, {"channel", "twitch,discord", "room,42"}} {
+		name := identityName(kindKey.kind, kindKey.service, kindKey.key)
+		if strings.Contains(name, ",") {
+			t.Fatalf("identity name contains query-list separator: %q", name)
+		}
+		values, err := url.ParseQuery("name=" + url.QueryEscape(name))
+		if err != nil || len(values["name"]) != 1 || strings.Contains(values.Get("name"), ",") {
+			t.Fatalf("identity query is not one safe exact value: %v %v", values, err)
+		}
+	}
+}
+
+func TestV3_ResolveIdentity_ServiceAndTypeRootFiltersAreLoadBearing(t *testing.T) {
+	f, s := newResourceFixture(t)
+	userName := identityName("user", "twitch", "speaker-7")
+	channelName := identityName("channel", "twitch", "room-42")
+	f.nodes[13] = node{ID: 13, Name: userName, Type: "channel", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)}
+	f.nodes[14] = node{ID: 14, Name: userName, Type: "user", Root: 99, Owner: 20, Access: json.RawMessage(`"None"`)}
+	f.nodes[15] = node{ID: 15, Name: channelName, Type: "user", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)}
+	f.nodes[16] = node{ID: 16, Name: channelName, Type: "channel", Root: 99, Owner: 20, Access: json.RawMessage(`"None"`)}
+	m := createResource(t, s, v3Message)
+	if m.UserID != "100" || m.ChannelID != "101" || len(f.nodes) != 7 {
+		t.Fatalf("foreign root/type matched natural keys: %+v nodes=%d", m, len(f.nodes))
+	}
+}
+
+func TestV3_ResolveIdentity_ServiceNamespacesRemainDistinct(t *testing.T) {
+	f, s := newResourceFixture(t)
+	first := createResource(t, s, v3Message)
+	userService := strings.Replace(v3Message, `"user":{"service":"twitch"`, `"user":{"service":"discord"`, 1)
+	if userService == v3Message {
+		t.Fatal("user service namespace fixture did not change")
+	}
+	second := createResource(t, s, userService)
+	if first.UserID == second.UserID || first.ChannelID != second.ChannelID || second.User.Service != "discord" {
+		t.Fatalf("user namespace was ignored: first=%+v second=%+v", first, second)
+	}
+	channelService := strings.Replace(v3Message, `"service":"twitch","channel"`, `"service":"discord","channel"`, 1)
+	if channelService == v3Message {
+		t.Fatal("channel service namespace fixture did not change")
+	}
+	third := createResource(t, s, channelService)
+	if first.UserID != third.UserID || first.ChannelID == third.ChannelID || third.Service != "discord" {
+		t.Fatalf("channel namespace was ignored: first=%+v third=%+v", first, third)
+	}
+	userID, _ := resourceID(second.UserID)
+	channelID, _ := resourceID(third.ChannelID)
+	var user identityContent
+	var channel identityContent
+	if json.Unmarshal([]byte(*f.nodes[userID].Content), &user) != nil || user.Service != "discord" || user.ServiceID != "speaker-7" {
+		t.Fatalf("wrong user tuple stored: %+v", user)
+	}
+	if json.Unmarshal([]byte(*f.nodes[channelID].Content), &channel) != nil || channel.Service != "discord" || channel.Channel != "room-42" {
+		t.Fatalf("wrong channel tuple stored: %+v", channel)
 	}
 }
 

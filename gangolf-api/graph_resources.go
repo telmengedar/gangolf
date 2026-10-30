@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -55,7 +56,7 @@ func nodePath(id int64) string {
 
 func identityName(kind, service, key string) string {
 	data, _ := json.Marshal([]string{service, key})
-	return "gangolf-" + kind + ":" + string(data)
+	return "gangolf-" + kind + ":" + base64.RawURLEncoding.EncodeToString(data)
 }
 
 func (g *graph) resourceNodes(ctx context.Context, kind, name string, owner int64) ([]node, error) {
