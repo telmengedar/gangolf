@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/url"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -282,6 +284,28 @@ func (g *graph) replaceContent(ctx context.Context, id int64, value any) error {
 	return err
 }
 
+func canonicalIdentityProjection(n node) node {
+	n.Access = json.RawMessage("0")
+	n.Links = slices.Clone(n.Links)
+	slices.SortFunc(n.Links, func(a, b relation) int {
+		if order := cmp.Compare(a.Source, b.Source); order != 0 {
+			return order
+		}
+		if order := cmp.Compare(a.Target, b.Target); order != 0 {
+			return order
+		}
+		if order := cmp.Compare(a.Type, b.Type); order != 0 {
+			return order
+		}
+		return cmp.Compare(a.Context, b.Context)
+	})
+	return n
+}
+
+func sameIdentityProjection(a, b node) bool {
+	return a.privateAccess() && b.privateAccess() && reflect.DeepEqual(canonicalIdentityProjection(a), canonicalIdentityProjection(b))
+}
+
 func (g *graph) resolveIdentity(ctx context.Context, kind string, value identityContent, owner int64) (int64, error) {
 	key := value.ServiceID
 	if kind == "channel" {
@@ -307,7 +331,7 @@ func (g *graph) resolveIdentity(ctx context.Context, kind string, value identity
 	if err != nil {
 		return 0, err
 	}
-	if len(integrity) > 1 || len(nodes) == 1 && (len(integrity) != 1 || !reflect.DeepEqual(nodes[0], integrity[0])) {
+	if len(integrity) > 1 || len(nodes) == 1 && (len(integrity) != 1 || !sameIdentityProjection(nodes[0], integrity[0])) {
 		return 0, errCorrupt
 	}
 	var n node
@@ -345,7 +369,7 @@ func (g *graph) resolveIdentity(ctx context.Context, kind string, value identity
 	if err != nil {
 		return 0, err
 	}
-	if !reflect.DeepEqual(n, confirmed) {
+	if !sameIdentityProjection(n, confirmed) {
 		return 0, errCorrupt
 	}
 	n = confirmed
