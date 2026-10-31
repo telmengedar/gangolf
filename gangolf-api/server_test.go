@@ -85,7 +85,11 @@ func (f *graphFixture) serve(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/nodes/11" {
 			id = 11
 		}
-		respond(w, 200, node{ID: id, Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)})
+		if id == 10 {
+			respond(w, 200, node{ID: id, Name: "Gangolf", Type: "project", Owner: 20, Access: json.RawMessage(`"None"`), Links: []relation{{Source: 10, Target: 11, Type: "None"}, {Source: 10, Target: 13, Type: "None"}, {Source: 10, Target: 14, Type: "None"}}})
+		} else {
+			respond(w, 200, node{ID: id, Name: "Messages", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)})
+		}
 		return
 	}
 	if r.URL.Path == "/api/nodes/12" {
@@ -123,6 +127,29 @@ func (f *graphFixture) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/api/nodes" && r.Method == "GET" {
 		q := r.URL.Query()
+		if q.Get("type") == "" {
+			if q.Get("id") == "10" {
+				project := node{ID: 10, Name: "Gangolf", Type: "project", Owner: 20, Access: json.RawMessage(`"None"`), Links: []relation{{Source: 10, Target: 11, Type: "None"}, {Source: 10, Target: 13, Type: "None"}, {Source: 10, Target: 14, Type: "None"}}}
+				respond(w, 200, graphPage{Result: []node{project}, Total: 1})
+				return
+			}
+			groups := map[string]node{
+				"Users":    {ID: 13, Name: "Users", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`), Links: []relation{{Source: 10, Target: 13, Type: "None"}}},
+				"Channels": {ID: 14, Name: "Channels", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`), Links: []relation{{Source: 10, Target: 14, Type: "None"}}},
+				"Messages": {ID: 11, Name: "Messages", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`), Links: []relation{{Source: 10, Target: 11, Type: "None"}}},
+			}
+			if q.Get("rootNodeId") != "10" {
+				w.WriteHeader(400)
+				return
+			}
+			group, ok := groups[q.Get("name")]
+			if !ok {
+				respond(w, 200, graphPage{Result: []node{}, Total: 0})
+				return
+			}
+			respond(w, 200, graphPage{Result: []node{group}, Total: 1})
+			return
+		}
 		if q.Get("rootNodeId") != "10" || q.Get("linkedto") != "11" || q.Get("type") != batchType || q.Get("sort") != "id" || q.Get("descending") != "false" || !strings.Contains(q.Get("fields"), "content") {
 			w.WriteHeader(400)
 			return

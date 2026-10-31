@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 var errUnavailable = errors.New("dependency unavailable")
@@ -22,6 +23,8 @@ type graph struct {
 	base                *url.URL
 	token               string
 	root, group, config int64
+	groupMu             sync.RWMutex
+	groups              map[string]int64
 	http                *http.Client
 }
 
@@ -31,10 +34,39 @@ type node struct {
 	Owner       int64           `json:"ownerId"`
 	Links       []relation      `json:"linkDetails"`
 	Type        string          `json:"type"`
+	TypeIsNull  bool            `json:"-"`
 	Root        int64           `json:"rootNodeId"`
 	Access      json.RawMessage `json:"access"`
 	Content     *string         `json:"content"`
 	ContentType string          `json:"contentType"`
+}
+
+func (n *node) UnmarshalJSON(data []byte) error {
+	type nodeAlias node
+	if err := json.Unmarshal(data, (*nodeAlias)(n)); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	typeValue, present := fields["type"]
+	n.TypeIsNull = !present || bytes.Equal(bytes.TrimSpace(typeValue), []byte("null"))
+	return nil
+}
+
+func (n node) MarshalJSON() ([]byte, error) {
+	type nodeAlias node
+	data, err := json.Marshal(nodeAlias(n))
+	if err != nil || n.Type != "" {
+		return data, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	fields["type"] = json.RawMessage("null")
+	return json.Marshal(fields)
 }
 
 func (n node) privateAccess() bool {

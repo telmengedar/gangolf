@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
@@ -185,6 +187,194 @@ func TestV3_ResolveIdentity_ExactKeysReuseFirstNameAndRecoverEmptyContent(t *tes
 	}
 }
 
+func TestGraph_PrivateDomainGroups_TypeProjectionSemantics(t *testing.T) {
+	for _, projection := range []string{"omitted", "null", "empty", "named"} {
+		t.Run(projection, func(t *testing.T) {
+			f, s := newResourceFixture(t)
+			edited := 0
+			observeIdentityWire(s, nil, func(r *http.Request, response *http.Response) {
+				if r.URL.Path != "/api/nodes" || r.URL.Query().Get("name") == "" {
+					return
+				}
+				rewriteIdentityPage(t, response, func(page map[string]json.RawMessage) {
+					var rows []map[string]json.RawMessage
+					if err := json.Unmarshal(page["result"], &rows); err != nil || len(rows) != 1 {
+						t.Fatalf("group projection rows=%v error=%v", rows, err)
+					}
+					switch projection {
+					case "omitted":
+						delete(rows[0], "type")
+					case "null":
+						rows[0]["type"] = json.RawMessage("null")
+					case "empty":
+						rows[0]["type"] = json.RawMessage(`""`)
+					case "named":
+						rows[0]["type"] = json.RawMessage(`"user"`)
+					}
+					page["result"], _ = json.Marshal(rows)
+					edited++
+				})
+			})
+			err := s.graph.privateDomainGroups(context.Background(), 20)
+			if edited == 0 || f.writes != 0 {
+				t.Fatalf("projections=%d writes=%d", edited, f.writes)
+			}
+			if projection == "omitted" || projection == "null" {
+				if err != nil || edited != 3 {
+					t.Fatalf("valid groups error=%v projections=%d", err, edited)
+				}
+				for kind, want := range map[string]int64{"user": 13, "channel": 14, "message": 11} {
+					if id, ok := s.graph.groupID(kind); !ok || id != want {
+						t.Fatalf("group %s=%d resolved=%v want=%d", kind, id, ok, want)
+					}
+				}
+			} else if err != errCorrupt {
+				t.Fatalf("non-null type accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestV3_ProjectGroupsRequireCanonicalMetadataAndAdjacency(t *testing.T) {
+	for _, mode := range []string{"project-type", "project-name", "legacy-project-null", "legacy-messages-type", "legacy-messages-name", "missing-messages-project-link", "project-owner", "project-access", "missing-users", "duplicate-users", "users-type", "users-root", "users-owner", "users-access", "missing-project-link"} {
+		t.Run(mode, func(t *testing.T) {
+			f, s := newResourceFixture(t)
+			switch mode {
+			case "legacy-project-null":
+				n := f.containers[10]
+				n.Type = ""
+				f.containers[10] = n
+			case "legacy-messages-type":
+				n := f.containers[11]
+				n.Type = "gangolf-message-group"
+				f.containers[11] = n
+			case "legacy-messages-name":
+				n := f.containers[11]
+				n.Name = "gangolf-api-smoke-c691f065-messages"
+				f.containers[11] = n
+			case "missing-messages-project-link":
+				f.containerEdges = f.containerEdges[1:]
+			case "project-name":
+				n := f.containers[10]
+				n.Name = "gangolf-api-smoke-c691f065-root"
+				f.containers[10] = n
+			case "project-type":
+				n := f.containers[10]
+				n.Type = "group"
+				f.containers[10] = n
+			case "project-owner":
+				n := f.containers[10]
+				n.Owner = 99
+				f.containers[10] = n
+			case "project-access":
+				n := f.containers[10]
+				n.Access = json.RawMessage(`"Read"`)
+				f.containers[10] = n
+			case "missing-users":
+				delete(f.containers, 13)
+			case "duplicate-users":
+				f.containers[15] = node{ID: 15, Name: "Users", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)}
+				f.containerEdges = append(f.containerEdges, relation{Source: 10, Target: 15, Type: "None"})
+			case "users-type":
+				n := f.containers[13]
+				n.Type = "user"
+				f.containers[13] = n
+			case "users-root":
+				n := f.containers[13]
+				n.Root = 99
+				f.containers[13] = n
+			case "users-owner":
+				n := f.containers[13]
+				n.Owner = 99
+				f.containers[13] = n
+			case "users-access":
+				n := f.containers[13]
+				n.Access = json.RawMessage(`"Read"`)
+				f.containers[13] = n
+			case "missing-project-link":
+				f.containerEdges = f.containerEdges[1:]
+			}
+			w := request(t, s, "POST", "/api/v3/messages", "key.secret", v3Message)
+			status(t, w, 500)
+			if f.writes != 0 || len(f.nodes) != 0 {
+				t.Fatalf("invalid topology reached writes: writes=%d nodes=%d", f.writes, len(f.nodes))
+			}
+		})
+	}
+}
+
+func TestV3_ExactDomainMembershipScopesQueriesAndPreservesSemanticLinks(t *testing.T) {
+	f, s := newResourceFixture(t)
+	foreignGroup := node{ID: 31, Name: "Users", Root: 30, Owner: 20, Access: json.RawMessage(`"None"`)}
+	foreignUser := node{ID: 32, Name: identityName("user", "twitch", "speaker-7"), Type: "user", Root: 30, Owner: 20, Access: json.RawMessage(`"None"`)}
+	f.containers[30] = node{ID: 30, Type: "project", Owner: 20, Access: json.RawMessage(`"None"`)}
+	f.containers[31] = foreignGroup
+	f.containerEdges = append(f.containerEdges, relation{Source: 30, Target: 31, Type: "None"})
+	f.nodes[32] = foreignUser
+	f.edges = append(f.edges, relation{Source: 32, Target: 31, Type: "None"})
+	m := createResource(t, s, v3Message)
+	if m.UserID == "32" {
+		t.Fatal("same identity key in another project was reused")
+	}
+	uid, _ := resourceID(m.UserID)
+	cid, _ := resourceID(m.ChannelID)
+	for _, edge := range []struct{ source, target int64 }{{uid, 13}, {cid, 14}} {
+		if !plainLinkBetween(f.projection(f.nodes[edge.source]).Links, edge.source, edge.target) {
+			t.Fatalf("missing plain membership edge: %+v", edge)
+		}
+	}
+	for _, q := range f.queries {
+		if q.Get("rootNodeId") != "10" || q.Get("linkedto") == "" && q.Get("name") == "" || q.Get("type") == "" {
+			t.Fatalf("unscoped collection query: %v", q)
+		}
+	}
+	var semantic []relation
+	for _, e := range f.edges {
+		if e.Source == int64(102) || e.Target == int64(102) {
+			semantic = append(semantic, e)
+		}
+	}
+	contexts := map[string]bool{}
+	for _, e := range semantic {
+		if e.Context != "" {
+			if e.Type != "Unidirectional" {
+				t.Fatalf("semantic link type changed: %+v", e)
+			}
+			contexts[e.Context] = true
+		}
+	}
+	if !contexts["authored-by"] || !contexts["in-channel"] || contexts["member-of"] {
+		t.Fatalf("message semantic links=%v", contexts)
+	}
+	if !plainLinkBetween(f.projection(f.nodes[102]).Links, 102, 11) {
+		t.Fatal("message group membership is not plain")
+	}
+}
+
+func TestV3_ItemReadRejectsMissingOrWrongDomainMembership(t *testing.T) {
+	for _, wrongGroup := range []int64{0, 14} {
+		t.Run(strconv.FormatInt(wrongGroup, 10), func(t *testing.T) {
+			f, s := newResourceFixture(t)
+			m := createResource(t, s, v3Message)
+			uid, _ := resourceID(m.UserID)
+			for i := 0; i < len(f.edges); i++ {
+				if f.edges[i].Source == uid && (f.edges[i].Target == 13 || f.edges[i].Target == 14) {
+					f.edges = append(f.edges[:i], f.edges[i+1:]...)
+					i--
+				}
+			}
+			if wrongGroup != 0 {
+				f.edges = append(f.edges, relation{Source: uid, Target: wrongGroup, Type: "None"})
+			}
+			w := request(t, s, "GET", "/api/v3/messages/102", "key.secret", "")
+			status(t, w, 500)
+			if strings.Contains(w.Body.String(), "Distinct Speaker") || strings.Contains(w.Body.String(), "hello") {
+				t.Fatal("invalid membership disclosed content")
+			}
+		})
+	}
+}
+
 func TestV3_ResolveIdentity_CommaKeysReuseThroughNameArrayBinding(t *testing.T) {
 	f, s := newResourceFixture(t)
 	body := strings.Replace(v3Message, "twitch", "twitch,discord", 1)
@@ -264,6 +454,7 @@ func TestV3_ResolveIdentity_DuplicateAndMismatchedKeysFailClosed(t *testing.T) {
 				n.ID = f.next
 				f.next++
 				f.nodes[n.ID] = n
+				f.edges = append(f.edges, relation{Source: n.ID, Target: 13, Type: "None"})
 			case "mismatch":
 				body := strings.Replace(*n.Content, "speaker-7", "other", 1)
 				n.Content = &body
@@ -298,7 +489,7 @@ func TestV3_ServeHTTP_ReplyTargetsMustBePublishedAndSameChannel(t *testing.T) {
 		t.Fatal("nested reply")
 	}
 	for _, e := range f.edges {
-		if e.Type != "Unidirectional" || e.Source <= e.Target && e.Context == "replies-to" {
+		if e.Context == "replies-to" && (e.Type != "Unidirectional" || e.Source <= e.Target) {
 			t.Fatal("reply direction")
 		}
 	}
@@ -310,17 +501,28 @@ func TestV3_MessagesV3_MalformedRelationsAndIdentitiesFailClosed(t *testing.T) {
 			f, s := newResourceFixture(t)
 			m := createResource(t, s, v3Message)
 			child := createResource(t, s, replyBody(m.ID))
+			mid, _ := resourceID(m.ID)
+			semantic := -1
+			for i, e := range f.edges {
+				if e.Source == mid && e.Context == "authored-by" {
+					semantic = i
+					break
+				}
+			}
+			if semantic < 0 {
+				t.Fatal("authored-by edge missing from fixture")
+			}
 			switch mode {
 			case "missing-author":
-				f.edges = f.edges[1:]
+				f.edges = append(f.edges[:semantic], f.edges[semantic+1:]...)
 			case "wrong-direction":
-				f.edges[0].Source, f.edges[0].Target = f.edges[0].Target, f.edges[0].Source
+				f.edges[semantic].Source, f.edges[semantic].Target = f.edges[semantic].Target, f.edges[semantic].Source
 			case "wrong-context":
-				f.edges[0].Context = "wrong"
+				f.edges[semantic].Context = "wrong"
 			case "wrong-target":
-				f.edges[0].Target = 999
+				f.edges[semantic].Target = 999
 			case "extra-author":
-				f.edges = append(f.edges, f.edges[0])
+				f.edges = append(f.edges, f.edges[semantic])
 			case "bad-identity":
 				id, _ := resourceID(m.UserID)
 				n := f.nodes[id]
@@ -400,7 +602,7 @@ func TestV3_ListV3_FiltersNumericOrderAndGraphPages(t *testing.T) {
 }
 
 func TestV3_PublishMessage_PartialWritesStayInvisible(t *testing.T) {
-	for _, point := range []string{"create:user", "created:user", "content:user", "committed:user", "create:channel", "created:channel", "content:channel", "committed:channel", "create:message", "created:message", "link:authored-by", "link:in-channel", "link:member-of", "ignored:authored-by", "content:message"} {
+	for _, point := range []string{"create:user", "created:user", "content:user", "committed:user", "create:channel", "created:channel", "content:channel", "committed:channel", "create:message", "created:message", "link:authored-by", "link:in-channel", "link:", "ignored:authored-by", "ignored:", "content:message"} {
 		t.Run(point, func(t *testing.T) {
 			f, s := newResourceFixture(t)
 			f.fail = point
@@ -434,8 +636,9 @@ func TestV3_PublishMessage_PartialWritesStayInvisible(t *testing.T) {
 					users++
 				}
 			}
-			if users != 1 {
-				t.Fatal("identity not recovered/reused")
+			wantUsers := 1
+			if users != wantUsers {
+				t.Fatalf("unexpected user count after retry: got=%d want=%d", users, wantUsers)
 			}
 		})
 	}

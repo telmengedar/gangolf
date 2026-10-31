@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,24 +15,34 @@ import (
 )
 
 type resourceFixture struct {
-	mu          sync.Mutex
-	legacy      *graphFixture
-	nodes       map[int64]node
-	edges       []relation
-	next        int64
-	writes      int
-	fail        string
-	failed      bool
-	corrupt     func(*node)
-	identity    map[string]any
-	pageSize    int
-	listedPages int
+	mu             sync.Mutex
+	legacy         *graphFixture
+	nodes          map[int64]node
+	containers     map[int64]node
+	edges          []relation
+	containerEdges []relation
+	next           int64
+	writes         int
+	fail           string
+	failed         bool
+	corrupt        func(*node)
+	identity       map[string]any
+	pageSize       int
+	listedPages    int
+	queries        []url.Values
 }
 
 func newResourceFixture(t *testing.T) (*resourceFixture, *server) {
 	t.Helper()
 	legacy, s := newFixture(t)
-	f := &resourceFixture{legacy: legacy, nodes: make(map[int64]node), next: 100, identity: map[string]any{"id": 20, "enabled": true, "permissions": []string{"write"}}, pageSize: 500}
+	f := &resourceFixture{legacy: legacy, nodes: make(map[int64]node), containers: map[int64]node{
+		10: {ID: 10, Name: "Gangolf", Type: "project", Owner: 20, Access: json.RawMessage(`"None"`)},
+		11: {ID: 11, Name: "Messages", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)},
+		13: {ID: 13, Name: "Users", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)},
+		14: {ID: 14, Name: "Channels", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)},
+	}, containerEdges: []relation{
+		{Source: 10, Target: 11, Type: "None"}, {Source: 10, Target: 13, Type: "None"}, {Source: 10, Target: 14, Type: "None"},
+	}, next: 100, identity: map[string]any{"id": 20, "enabled": true, "permissions": []string{"write"}}, pageSize: 500}
 	host := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(host.Close)
 	s.graph.base, _ = url.Parse(host.URL + "/api")
@@ -49,7 +60,7 @@ func (f *resourceFixture) inject(w http.ResponseWriter, point string) bool {
 
 func (f *resourceFixture) projection(n node) node {
 	n.Links = make([]relation, 0)
-	for _, e := range f.edges {
+	for _, e := range append(append([]relation{}, f.containerEdges...), f.edges...) {
 		if e.Source == n.ID || e.Target == n.ID {
 			n.Links = append(n.Links, e)
 		}
@@ -73,9 +84,22 @@ func (f *resourceFixture) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if r.Method == "GET" && (r.URL.Path == "/api/nodes/10" || r.URL.Path == "/api/nodes/11" || r.URL.Path == "/api/nodes/12") {
+	if r.Method == "GET" && r.URL.Path == "/api/nodes/12" {
+		n := node{ID: 12, Type: "config", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)}
+		if f.corrupt != nil {
+			f.corrupt(&n)
+		}
+		respond(w, 200, n)
+		return
+	}
+	if r.Method == "GET" && (r.URL.Path == "/api/nodes/10" || r.URL.Path == "/api/nodes/11" || r.URL.Path == "/api/nodes/13" || r.URL.Path == "/api/nodes/14") {
 		id, _ := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/api/nodes/"), 10, 64)
-		respond(w, 200, f.projection(node{ID: id, Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)}))
+		n, ok := f.containers[id]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		respond(w, 200, f.projection(n))
 		return
 	}
 	if r.URL.Path == "/api/nodes" && r.Method == "POST" {
@@ -115,6 +139,21 @@ func (f *resourceFixture) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		q := r.URL.Query()
+		if kind := q.Get("type"); kind == "user" || kind == "channel" || kind == "message" {
+			group := map[string]string{"user": "13", "channel": "14", "message": "11"}[kind]
+			integrity := false
+			if (kind == "user" || kind == "channel") && len(q["name"]) == 1 && len(q["linkedto"]) == 0 {
+				prefix := "gangolf-" + kind + ":"
+				data, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(q.Get("name"), prefix))
+				var tuple []string
+				integrity = strings.HasPrefix(q.Get("name"), prefix) && err == nil && json.Unmarshal(data, &tuple) == nil && len(tuple) == 2
+			}
+			if len(q["rootNodeId"]) != 1 || q.Get("rootNodeId") != "10" || len(q["type"]) != 1 || (!integrity && (len(q["linkedto"]) != 1 || q.Get("linkedto") != group)) {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			f.queries = append(f.queries, q)
+		}
 		if !strings.Contains(q.Get("fields"), "ownerId") || !strings.Contains(q.Get("fields"), "linkDetails") {
 			w.WriteHeader(400)
 			return
@@ -125,7 +164,14 @@ func (f *resourceFixture) serve(w http.ResponseWriter, r *http.Request) {
 		if len(nameValues) == 1 {
 			nameValues = strings.Split(nameValues[0], ",")
 		}
+		all := make([]node, 0, len(f.nodes)+len(f.containers))
 		for _, n := range f.nodes {
+			all = append(all, n)
+		}
+		for _, n := range f.containers {
+			all = append(all, n)
+		}
+		for _, n := range all {
 			nameMatches := len(nameValues) == 0
 			for _, name := range nameValues {
 				if n.Name == name {
@@ -139,7 +185,7 @@ func (f *resourceFixture) serve(w http.ResponseWriter, r *http.Request) {
 			if q.Get("linkedto") != "" {
 				group, _ := strconv.ParseInt(q.Get("linkedto"), 10, 64)
 				linked := false
-				for _, e := range f.edges {
+				for _, e := range append(append([]relation{}, f.containerEdges...), f.edges...) {
 					if e.Source == n.ID && e.Target == group || e.Target == n.ID && e.Source == group {
 						linked = true
 					}
@@ -182,9 +228,18 @@ func (f *resourceFixture) serve(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if f.fail != "ignored:"+context {
+					for _, e := range f.edges {
+						if e.Source == id && e.Target == target || e.Source == target && e.Target == id {
+							w.WriteHeader(200)
+							return
+						}
+					}
 					f.edges = append(f.edges, relation{Source: id, Target: target, Type: r.URL.Query().Get("linkType"), Context: context})
 				} else {
 					f.failed = true
+				}
+				if f.inject(w, "linked:"+context) {
+					return
 				}
 				w.WriteHeader(200)
 				return

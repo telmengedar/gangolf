@@ -7,8 +7,28 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
+
+func TestNode_UnmarshalJSON_NullOrOmittedTypeIsStructural(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data string
+		null bool
+	}{{"null", `{"type":null}`, true}, {"empty", `{"type":""}`, false}, {"missing", `{}`, true}, {"named", `{"type":"user"}`, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var n node
+			if err := json.Unmarshal([]byte(tc.data), &n); err != nil || n.TypeIsNull != tc.null {
+				t.Fatalf("TypeIsNull=%v error=%v", n.TypeIsNull, err)
+			}
+		})
+	}
+	data, err := json.Marshal(node{})
+	if err != nil || !strings.Contains(string(data), `"type":null`) {
+		t.Fatalf("structural node type encoding=%s error=%v", data, err)
+	}
+}
 
 func TestGraph_PrivateAccessWireMetadata_EnforcesExplicitPrivateValues(t *testing.T) {
 	cases := []struct {
