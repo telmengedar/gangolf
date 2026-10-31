@@ -36,6 +36,78 @@ func (g *graph) serviceIdentity(ctx context.Context) (int64, error) {
 	return 0, errCorrupt
 }
 
+func domainGroup(kind string) (string, bool) {
+	switch kind {
+	case "user":
+		return "Users", true
+	case "channel":
+		return "Channels", true
+	case "message":
+		return "Messages", true
+	default:
+		return "", false
+	}
+}
+
+func (g *graph) groupID(kind string) (int64, bool) {
+	if _, ok := domainGroup(kind); !ok {
+		return 0, false
+	}
+	g.groupMu.RLock()
+	id, ok := g.groups[kind]
+	g.groupMu.RUnlock()
+	return id, ok && id > 0
+}
+
+func plainLinkBetween(links []relation, a, b int64) bool {
+	for _, e := range links {
+		if (e.Source == a && e.Target == b || e.Source == b && e.Target == a) && e.Type == "None" && e.Context == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *graph) groupByName(ctx context.Context, name string, owner int64) (node, error) {
+	result := make([]node, 0, 1)
+	offset := 0
+	for {
+		q := url.Values{"rootNodeId": {strconv.FormatInt(g.root, 10)}, "name": {name}, "fields": {"id,name,type,rootNodeId,ownerId,access,linkDetails"}, "sort": {"id"}, "descending": {"false"}, "count": {"500"}, "continue": {strconv.Itoa(offset)}}
+		data, err := g.request(ctx, http.MethodGet, "/nodes", q, nil)
+		if err != nil {
+			return node{}, err
+		}
+		var page graphPage
+		if json.Unmarshal(data, &page) != nil || page.Result == nil || page.Total < 0 {
+			return node{}, errCorrupt
+		}
+		for _, n := range page.Result {
+			if n.Name == name {
+				result = append(result, n)
+			}
+		}
+		next := offset + len(page.Result)
+		if page.Continue != nil && (*page.Continue != next || next <= offset) {
+			return node{}, errCorrupt
+		}
+		if page.Continue == nil && next >= page.Total {
+			break
+		}
+		if next <= offset {
+			return node{}, errCorrupt
+		}
+		offset = next
+	}
+	if len(result) != 1 {
+		return node{}, errCorrupt
+	}
+	n := result[0]
+	if n.ID <= 0 || n.Root != g.root || n.Type != "" || !n.TypeIsNull || n.Owner != owner || !n.privateAccess() || !plainLinkBetween(n.Links, n.ID, g.root) {
+		return node{}, errCorrupt
+	}
+	return n, nil
+}
+
 func (g *graph) privateContainers(ctx context.Context, owner int64) error {
 	for _, id := range []int64{g.root, g.group} {
 		data, err := g.request(ctx, http.MethodGet, nodePath(id), nil, nil)
@@ -50,6 +122,46 @@ func (g *graph) privateContainers(ctx context.Context, owner int64) error {
 	return nil
 }
 
+func (g *graph) privateDomainGroups(ctx context.Context, owner int64) error {
+	q := url.Values{"id": {strconv.FormatInt(g.root, 10)}, "fields": {"id,type,ownerId,access,linkDetails"}, "count": {"2"}}
+	data, err := g.request(ctx, http.MethodGet, "/nodes", q, nil)
+	if err != nil {
+		return err
+	}
+	var projectPage graphPage
+	if json.Unmarshal(data, &projectPage) != nil || projectPage.Result == nil || projectPage.Total != 1 || len(projectPage.Result) != 1 || projectPage.Continue != nil {
+		return errCorrupt
+	}
+	project := projectPage.Result[0]
+	if project.ID != g.root || project.Type != "project" || project.Owner != owner || !project.privateAccess() {
+		return errCorrupt
+	}
+	resolved := make(map[string]int64, 3)
+	for _, kind := range []string{"user", "channel", "message"} {
+		name, _ := domainGroup(kind)
+		container, err := g.groupByName(ctx, name, owner)
+		if err != nil {
+			return err
+		}
+		if !plainLinkBetween(project.Links, g.root, container.ID) {
+			return errCorrupt
+		}
+		if kind == "message" && container.ID != g.group {
+			return errCorrupt
+		}
+		for _, existing := range resolved {
+			if existing == container.ID {
+				return errCorrupt
+			}
+		}
+		resolved[kind] = container.ID
+	}
+	g.groupMu.Lock()
+	g.groups = resolved
+	g.groupMu.Unlock()
+	return nil
+}
+
 func nodePath(id int64) string {
 	return "/nodes/" + strconv.FormatInt(id, 10)
 }
@@ -60,14 +172,16 @@ func identityName(kind, service, key string) string {
 }
 
 func (g *graph) resourceNodes(ctx context.Context, kind, name string, owner int64) ([]node, error) {
+	group, ok := g.groupID(kind)
+	if !ok {
+		return nil, errCorrupt
+	}
 	result := make([]node, 0)
 	offset := 0
 	var last int64
 	for {
 		q := url.Values{"rootNodeId": {strconv.FormatInt(g.root, 10)}, "type": {kind}, "fields": {"id,name,type,rootNodeId,ownerId,access,content,contentType,linkDetails"}, "sort": {"id"}, "descending": {"false"}, "count": {"500"}, "continue": {strconv.Itoa(offset)}}
-		if kind == "message" {
-			q.Set("linkedto", strconv.FormatInt(g.group, 10))
-		}
+		q.Set("linkedto", strconv.FormatInt(group, 10))
 		if name != "" {
 			q.Set("name", name)
 		}
@@ -80,7 +194,7 @@ func (g *graph) resourceNodes(ctx context.Context, kind, name string, owner int6
 			return nil, errCorrupt
 		}
 		for _, n := range page.Result {
-			if n.ID <= last || n.Type != kind || !g.privateNode(n, owner) {
+			if n.ID <= last || n.Type != kind || !g.privateNode(n, owner) || !plainLinkBetween(n.Links, n.ID, group) {
 				return nil, errCorrupt
 			}
 			last = n.ID
@@ -103,6 +217,10 @@ func (g *graph) resourceNodes(ctx context.Context, kind, name string, owner int6
 }
 
 func (g *graph) createResource(ctx context.Context, kind, name string, owner int64) (node, error) {
+	group, ok := g.groupID(kind)
+	if !ok {
+		return node{}, errCorrupt
+	}
 	metadata, _ := json.Marshal(map[string]any{"name": name, "type": kind, "rootNodeId": g.root, "access": 0, "skipEmbedding": true})
 	data, err := g.request(ctx, http.MethodPost, "/nodes", nil, metadata)
 	if err != nil {
@@ -112,7 +230,16 @@ func (g *graph) createResource(ctx context.Context, kind, name string, owner int
 	if json.Unmarshal(data, &n) != nil || n.Type != kind || n.Name != name || !g.privateNode(n, owner) || n.Content != nil {
 		return node{}, errCorrupt
 	}
+	if err := g.addPlainLink(ctx, n.ID, group); err != nil {
+		return node{}, err
+	}
 	return n, nil
+}
+
+func (g *graph) addPlainLink(ctx context.Context, source, target int64) error {
+	body, _ := json.Marshal(target)
+	_, err := g.request(ctx, http.MethodPost, nodePath(source)+"/links", url.Values{"linkType": {"None"}}, body)
+	return err
 }
 
 func (g *graph) replaceContent(ctx context.Context, id int64, value any) error {
@@ -143,6 +270,11 @@ func (g *graph) resolveIdentity(ctx context.Context, kind string, value identity
 	} else {
 		n = nodes[0]
 	}
+	confirmed, err := g.readEntity(ctx, n.ID, kind, owner)
+	if err != nil {
+		return 0, err
+	}
+	n = confirmed
 	if n.Content == nil || *n.Content == "" {
 		if err := g.replaceContent(ctx, n.ID, value); err != nil {
 			return 0, err
@@ -165,7 +297,11 @@ func identityValue(n node, kind, service, key string) (identityContent, error) {
 }
 
 func (g *graph) readEntity(ctx context.Context, id int64, kind string, owner int64) (node, error) {
-	q := url.Values{"id": {strconv.FormatInt(id, 10)}, "rootNodeId": {strconv.FormatInt(g.root, 10)}, "type": {kind}, "fields": {"id,name,type,rootNodeId,ownerId,access,content,contentType,linkDetails"}, "count": {"2"}}
+	group, ok := g.groupID(kind)
+	if !ok {
+		return node{}, errCorrupt
+	}
+	q := url.Values{"id": {strconv.FormatInt(id, 10)}, "rootNodeId": {strconv.FormatInt(g.root, 10)}, "linkedto": {strconv.FormatInt(group, 10)}, "type": {kind}, "fields": {"id,name,type,rootNodeId,ownerId,access,content,contentType,linkDetails"}, "count": {"2"}}
 	data, err := g.request(ctx, http.MethodGet, "/nodes", q, nil)
 	if err != nil {
 		return node{}, err
@@ -175,7 +311,7 @@ func (g *graph) readEntity(ctx context.Context, id int64, kind string, owner int
 		return node{}, errCorrupt
 	}
 	n := page.Result[0]
-	if n.ID != id || n.Type != kind || !g.privateNode(n, owner) {
+	if n.ID != id || n.Type != kind || !g.privateNode(n, owner) || !plainLinkBetween(n.Links, n.ID, group) {
 		return node{}, errCorrupt
 	}
 	return n, nil
@@ -220,11 +356,18 @@ func decodeMessage(n node) (messageContent, error) {
 func (g *graph) validateRelations(ctx context.Context, n node, m messageContent, owner int64) error {
 	uid, _ := resourceID(m.UserID)
 	cid, _ := resourceID(m.ChannelID)
-	expected := map[string]int64{"authored-by": uid, "in-channel": cid, "member-of": g.group}
+	group, ok := g.groupID("message")
+	if !ok {
+		return errCorrupt
+	}
+	expected := map[string]int64{"authored-by": uid, "in-channel": cid}
 	if m.ReplyTo != nil {
 		expected["replies-to"], _ = resourceID(*m.ReplyTo)
 	}
 	for _, e := range n.Links {
+		if e.Context == "" && e.Type == "None" && (e.Source == n.ID && e.Target == group || e.Target == n.ID && e.Source == group) {
+			continue
+		}
 		if e.Source != n.ID {
 			if e.Target != n.ID || e.Context != "replies-to" || e.Type != "Unidirectional" {
 				return errCorrupt
@@ -317,7 +460,7 @@ func (g *graph) publishMessage(ctx context.Context, m messageContent, owner int6
 	}
 	uid, _ := resourceID(m.UserID)
 	cid, _ := resourceID(m.ChannelID)
-	links := []relation{{Source: n.ID, Target: uid, Type: "Unidirectional", Context: "authored-by"}, {Source: n.ID, Target: cid, Type: "Unidirectional", Context: "in-channel"}, {Source: n.ID, Target: g.group, Type: "Unidirectional", Context: "member-of"}}
+	links := []relation{{Source: n.ID, Target: uid, Type: "Unidirectional", Context: "authored-by"}, {Source: n.ID, Target: cid, Type: "Unidirectional", Context: "in-channel"}}
 	if m.ReplyTo != nil {
 		pid, _ := resourceID(*m.ReplyTo)
 		links = append(links, relation{Source: n.ID, Target: pid, Type: "Unidirectional", Context: "replies-to"})
@@ -327,6 +470,9 @@ func (g *graph) publishMessage(ctx context.Context, m messageContent, owner int6
 		if _, err := g.request(ctx, http.MethodPost, nodePath(n.ID)+"/links", url.Values{"linkType": {e.Type}, "context": {e.Context}}, body); err != nil {
 			return 0, err
 		}
+	}
+	if err := g.addPlainLink(ctx, n.ID, g.group); err != nil {
+		return 0, err
 	}
 	confirmed, err := g.readEntity(ctx, n.ID, "message", owner)
 	if err != nil {

@@ -49,7 +49,10 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/api/i1/readiness" {
-		_, err := s.graph.loadConfig(ctx)
+		cfg, err := s.graph.loadConfig(ctx)
+		if err == nil {
+			err = s.graph.privateDomainGroups(ctx, cfg.serviceOwner)
+		}
 		if err == nil {
 			_, err = s.graph.list(ctx)
 		}
