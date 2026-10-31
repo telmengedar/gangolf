@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 )
@@ -196,12 +197,23 @@ func (g *graph) resourceNodes(ctx context.Context, kind, name string, owner int6
 	if !ok {
 		return nil, errCorrupt
 	}
+	return g.queryResourceNodes(ctx, kind, name, owner, group)
+}
+
+func (g *graph) identityIntegrity(ctx context.Context, kind, name string, owner int64) ([]node, error) {
+	if (kind != "user" && kind != "channel") || name == "" {
+		return nil, errCorrupt
+	}
+	return g.queryResourceNodes(ctx, kind, name, owner, 0)
+}
+
+func (g *graph) queryResourceNodes(ctx context.Context, kind, name string, owner, group int64) ([]node, error) {
 	result := make([]node, 0)
-	offset := 0
+	offset, total := 0, -1
 	var last int64
 	for {
 		q := url.Values{"rootNodeId": {strconv.FormatInt(g.root, 10)}, "type": {kind}, "fields": {"id,name,type,rootNodeId,ownerId,access,content,contentType,linkDetails"}, "sort": {"id"}, "descending": {"false"}, "count": {"500"}, "continue": {strconv.Itoa(offset)}}
-		if name == "" {
+		if group > 0 {
 			q.Set("linkedto", strconv.FormatInt(group, 10))
 		}
 		if name != "" {
@@ -211,28 +223,28 @@ func (g *graph) resourceNodes(ctx context.Context, kind, name string, owner int6
 		if err != nil {
 			return nil, err
 		}
-		var page graphPage
-		if json.Unmarshal(data, &page) != nil || page.Result == nil || page.Total < 0 {
+		var page struct {
+			Result   []node `json:"result"`
+			Total    *int   `json:"total"`
+			Continue *int   `json:"continue"`
+		}
+		if json.Unmarshal(data, &page) != nil || page.Result == nil || page.Total == nil || *page.Total < 0 || total >= 0 && total != *page.Total {
 			return nil, errCorrupt
 		}
+		total = *page.Total
 		for _, n := range page.Result {
-			if n.ID <= last || n.Type != kind || !g.privateNode(n, owner) || name == "" && !exactMembership(n, group) {
+			if n.ID <= last || n.Type != kind || !g.privateNode(n, owner) || n.Links == nil || name != "" && n.Name != name || group > 0 && !exactMembership(n, group) {
 				return nil, errCorrupt
 			}
 			last = n.ID
-			if name == "" || n.Name == name {
-				result = append(result, n)
-			}
+			result = append(result, n)
 		}
 		next := offset + len(page.Result)
-		if page.Continue != nil && (*page.Continue != next || next <= offset) {
+		if next > total || (page.Continue != nil) != (next < total) || page.Continue != nil && (*page.Continue != next || next <= offset) {
 			return nil, errCorrupt
 		}
-		if page.Continue == nil && next >= page.Total {
+		if next == total {
 			return result, nil
-		}
-		if next <= offset {
-			return nil, errCorrupt
 		}
 		offset = next
 	}
@@ -276,6 +288,9 @@ func (g *graph) resolveIdentity(ctx context.Context, kind string, value identity
 		key = value.Channel
 	}
 	name := identityName(kind, value.Service, key)
+	if kind != "user" && kind != "channel" {
+		return 0, errCorrupt
+	}
 	nodes, err := g.resourceNodes(ctx, kind, name, owner)
 	if err != nil {
 		return 0, err
@@ -283,30 +298,55 @@ func (g *graph) resolveIdentity(ctx context.Context, kind string, value identity
 	if len(nodes) > 1 {
 		return 0, errCorrupt
 	}
-	var n node
-	if len(nodes) == 0 {
-		n, err = g.createResource(ctx, kind, name, owner)
-		if err != nil {
+	if len(nodes) == 1 && nodes[0].Content != nil && *nodes[0].Content != "" {
+		if _, err := identityValue(nodes[0], kind, value.Service, key); err != nil {
 			return 0, err
 		}
-	} else {
+	}
+	integrity, err := g.identityIntegrity(ctx, kind, name, owner)
+	if err != nil {
+		return 0, err
+	}
+	if len(integrity) > 1 || len(nodes) == 1 && (len(integrity) != 1 || !reflect.DeepEqual(nodes[0], integrity[0])) {
+		return 0, errCorrupt
+	}
+	var n node
+	if len(nodes) == 1 {
 		n = nodes[0]
-		group, ok := g.groupID(kind)
-		if !ok {
-			return 0, errCorrupt
-		}
-		if !exactMembership(n, group) {
+	} else {
+		if len(integrity) == 0 {
+			n, err = g.createResource(ctx, kind, name, owner)
+			if err != nil {
+				return 0, err
+			}
+		} else {
+			n = integrity[0]
 			if n.Content != nil && *n.Content != "" || len(n.Links) != 0 {
+				return 0, errCorrupt
+			}
+			group, ok := g.groupID(kind)
+			if !ok {
 				return 0, errCorrupt
 			}
 			if err := g.addPlainLink(ctx, n.ID, group); err != nil {
 				return 0, err
 			}
 		}
+		confirmed, err := g.resourceNodes(ctx, kind, name, owner)
+		if err != nil {
+			return 0, err
+		}
+		if len(confirmed) != 1 || confirmed[0].ID != n.ID {
+			return 0, errCorrupt
+		}
+		n = confirmed[0]
 	}
 	confirmed, err := g.readEntity(ctx, n.ID, kind, owner)
 	if err != nil {
 		return 0, err
+	}
+	if !reflect.DeepEqual(n, confirmed) {
+		return 0, errCorrupt
 	}
 	n = confirmed
 	if n.Content == nil || *n.Content == "" {

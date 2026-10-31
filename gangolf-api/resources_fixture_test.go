@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -140,7 +141,14 @@ func (f *resourceFixture) serve(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		if kind := q.Get("type"); kind == "user" || kind == "channel" || kind == "message" {
 			group := map[string]string{"user": "13", "channel": "14", "message": "11"}[kind]
-			if q.Get("rootNodeId") != "10" || (q.Get("linkedto") != group && !(q.Get("name") != "" && q.Get("linkedto") == "")) {
+			integrity := false
+			if (kind == "user" || kind == "channel") && len(q["name"]) == 1 && len(q["linkedto"]) == 0 {
+				prefix := "gangolf-" + kind + ":"
+				data, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(q.Get("name"), prefix))
+				var tuple []string
+				integrity = strings.HasPrefix(q.Get("name"), prefix) && err == nil && json.Unmarshal(data, &tuple) == nil && len(tuple) == 2
+			}
+			if len(q["rootNodeId"]) != 1 || q.Get("rootNodeId") != "10" || len(q["type"]) != 1 || (!integrity && (len(q["linkedto"]) != 1 || q.Get("linkedto") != group)) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
