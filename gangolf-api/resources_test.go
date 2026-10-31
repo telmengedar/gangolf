@@ -186,10 +186,28 @@ func TestV3_ResolveIdentity_ExactKeysReuseFirstNameAndRecoverEmptyContent(t *tes
 }
 
 func TestV3_ProjectGroupsRequireCanonicalMetadataAndAdjacency(t *testing.T) {
-	for _, mode := range []string{"project-type", "project-owner", "project-access", "missing-users", "duplicate-users", "users-type", "users-root", "users-owner", "users-access", "missing-project-link"} {
+	for _, mode := range []string{"project-type", "project-name", "legacy-project-null", "legacy-messages-type", "legacy-messages-name", "missing-messages-project-link", "project-owner", "project-access", "missing-users", "duplicate-users", "users-type", "users-root", "users-owner", "users-access", "missing-project-link"} {
 		t.Run(mode, func(t *testing.T) {
 			f, s := newResourceFixture(t)
 			switch mode {
+			case "legacy-project-null":
+				n := f.containers[10]
+				n.Type = ""
+				f.containers[10] = n
+			case "legacy-messages-type":
+				n := f.containers[11]
+				n.Type = "gangolf-message-group"
+				f.containers[11] = n
+			case "legacy-messages-name":
+				n := f.containers[11]
+				n.Name = "gangolf-api-smoke-c691f065-messages"
+				f.containers[11] = n
+			case "missing-messages-project-link":
+				f.containerEdges = f.containerEdges[1:]
+			case "project-name":
+				n := f.containers[10]
+				n.Name = "gangolf-api-smoke-c691f065-root"
+				f.containers[10] = n
 			case "project-type":
 				n := f.containers[10]
 				n.Type = "group"
@@ -256,7 +274,7 @@ func TestV3_ExactDomainMembershipScopesQueriesAndPreservesSemanticLinks(t *testi
 		}
 	}
 	for _, q := range f.queries {
-		if q.Get("rootNodeId") != "10" || q.Get("linkedto") == "" || q.Get("type") == "" {
+		if q.Get("rootNodeId") != "10" || q.Get("linkedto") == "" && q.Get("name") == "" || q.Get("type") == "" {
 			t.Fatalf("unscoped collection query: %v", q)
 		}
 	}
@@ -569,9 +587,6 @@ func TestV3_PublishMessage_PartialWritesStayInvisible(t *testing.T) {
 				}
 			}
 			wantUsers := 1
-			if point == "created:user" || point == "link:" || point == "ignored:" {
-				wantUsers = 2
-			}
 			if users != wantUsers {
 				t.Fatalf("unexpected user count after retry: got=%d want=%d", users, wantUsers)
 			}

@@ -68,6 +68,26 @@ func plainLinkBetween(links []relation, a, b int64) bool {
 	return false
 }
 
+func exactMembership(n node, group int64) bool {
+	memberships := 0
+	for _, e := range n.Links {
+		if (e.Source == n.ID && e.Target == group || e.Target == n.ID && e.Source == group) && e.Type == "None" && e.Context == "" {
+			memberships++
+			continue
+		}
+		if e.Type == "Unidirectional" {
+			if n.Type == "user" && e.Target == n.ID && e.Context == "authored-by" || n.Type == "channel" && e.Target == n.ID && e.Context == "in-channel" {
+				continue
+			}
+			if n.Type == "message" && (e.Source == n.ID && (e.Context == "authored-by" || e.Context == "in-channel" || e.Context == "replies-to") || e.Target == n.ID && e.Context == "replies-to") {
+				continue
+			}
+		}
+		return false
+	}
+	return memberships == 1
+}
+
 func (g *graph) groupByName(ctx context.Context, name string, owner int64) (node, error) {
 	result := make([]node, 0, 1)
 	offset := 0
@@ -123,7 +143,7 @@ func (g *graph) privateContainers(ctx context.Context, owner int64) error {
 }
 
 func (g *graph) privateDomainGroups(ctx context.Context, owner int64) error {
-	q := url.Values{"id": {strconv.FormatInt(g.root, 10)}, "fields": {"id,type,ownerId,access,linkDetails"}, "count": {"2"}}
+	q := url.Values{"id": {strconv.FormatInt(g.root, 10)}, "fields": {"id,name,type,ownerId,access,linkDetails"}, "count": {"2"}}
 	data, err := g.request(ctx, http.MethodGet, "/nodes", q, nil)
 	if err != nil {
 		return err
@@ -133,7 +153,7 @@ func (g *graph) privateDomainGroups(ctx context.Context, owner int64) error {
 		return errCorrupt
 	}
 	project := projectPage.Result[0]
-	if project.ID != g.root || project.Type != "project" || project.Owner != owner || !project.privateAccess() {
+	if project.ID != g.root || project.Type != "project" || project.Name != "Gangolf" || project.Owner != owner || !project.privateAccess() {
 		return errCorrupt
 	}
 	resolved := make(map[string]int64, 3)
@@ -181,7 +201,9 @@ func (g *graph) resourceNodes(ctx context.Context, kind, name string, owner int6
 	var last int64
 	for {
 		q := url.Values{"rootNodeId": {strconv.FormatInt(g.root, 10)}, "type": {kind}, "fields": {"id,name,type,rootNodeId,ownerId,access,content,contentType,linkDetails"}, "sort": {"id"}, "descending": {"false"}, "count": {"500"}, "continue": {strconv.Itoa(offset)}}
-		q.Set("linkedto", strconv.FormatInt(group, 10))
+		if name == "" {
+			q.Set("linkedto", strconv.FormatInt(group, 10))
+		}
 		if name != "" {
 			q.Set("name", name)
 		}
@@ -194,7 +216,7 @@ func (g *graph) resourceNodes(ctx context.Context, kind, name string, owner int6
 			return nil, errCorrupt
 		}
 		for _, n := range page.Result {
-			if n.ID <= last || n.Type != kind || !g.privateNode(n, owner) || !plainLinkBetween(n.Links, n.ID, group) {
+			if n.ID <= last || n.Type != kind || !g.privateNode(n, owner) || name == "" && !exactMembership(n, group) {
 				return nil, errCorrupt
 			}
 			last = n.ID
@@ -269,6 +291,18 @@ func (g *graph) resolveIdentity(ctx context.Context, kind string, value identity
 		}
 	} else {
 		n = nodes[0]
+		group, ok := g.groupID(kind)
+		if !ok {
+			return 0, errCorrupt
+		}
+		if !exactMembership(n, group) {
+			if n.Content != nil && *n.Content != "" || len(n.Links) != 0 {
+				return 0, errCorrupt
+			}
+			if err := g.addPlainLink(ctx, n.ID, group); err != nil {
+				return 0, err
+			}
+		}
 	}
 	confirmed, err := g.readEntity(ctx, n.ID, kind, owner)
 	if err != nil {
@@ -311,7 +345,7 @@ func (g *graph) readEntity(ctx context.Context, id int64, kind string, owner int
 		return node{}, errCorrupt
 	}
 	n := page.Result[0]
-	if n.ID != id || n.Type != kind || !g.privateNode(n, owner) || !plainLinkBetween(n.Links, n.ID, group) {
+	if n.ID != id || n.Type != kind || !g.privateNode(n, owner) || !exactMembership(n, group) {
 		return node{}, errCorrupt
 	}
 	return n, nil
@@ -470,9 +504,6 @@ func (g *graph) publishMessage(ctx context.Context, m messageContent, owner int6
 		if _, err := g.request(ctx, http.MethodPost, nodePath(n.ID)+"/links", url.Values{"linkType": {e.Type}, "context": {e.Context}}, body); err != nil {
 			return 0, err
 		}
-	}
-	if err := g.addPlainLink(ctx, n.ID, g.group); err != nil {
-		return 0, err
 	}
 	confirmed, err := g.readEntity(ctx, n.ID, "message", owner)
 	if err != nil {

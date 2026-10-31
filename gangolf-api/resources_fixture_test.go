@@ -35,7 +35,7 @@ func newResourceFixture(t *testing.T) (*resourceFixture, *server) {
 	t.Helper()
 	legacy, s := newFixture(t)
 	f := &resourceFixture{legacy: legacy, nodes: make(map[int64]node), containers: map[int64]node{
-		10: {ID: 10, Type: "project", Owner: 20, Access: json.RawMessage(`"None"`)},
+		10: {ID: 10, Name: "Gangolf", Type: "project", Owner: 20, Access: json.RawMessage(`"None"`)},
 		11: {ID: 11, Name: "Messages", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)},
 		13: {ID: 13, Name: "Users", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)},
 		14: {ID: 14, Name: "Channels", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)},
@@ -140,7 +140,7 @@ func (f *resourceFixture) serve(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		if kind := q.Get("type"); kind == "user" || kind == "channel" || kind == "message" {
 			group := map[string]string{"user": "13", "channel": "14", "message": "11"}[kind]
-			if q.Get("rootNodeId") != "10" || q.Get("linkedto") != group {
+			if q.Get("rootNodeId") != "10" || (q.Get("linkedto") != group && !(q.Get("name") != "" && q.Get("linkedto") == "")) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
@@ -220,9 +220,18 @@ func (f *resourceFixture) serve(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if f.fail != "ignored:"+context {
+					for _, e := range f.edges {
+						if e.Source == id && e.Target == target || e.Source == target && e.Target == id {
+							w.WriteHeader(200)
+							return
+						}
+					}
 					f.edges = append(f.edges, relation{Source: id, Target: target, Type: r.URL.Query().Get("linkType"), Context: context})
 				} else {
 					f.failed = true
+				}
+				if f.inject(w, "linked:"+context) {
+					return
 				}
 				w.WriteHeader(200)
 				return

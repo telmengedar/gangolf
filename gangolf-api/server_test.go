@@ -86,7 +86,7 @@ func (f *graphFixture) serve(w http.ResponseWriter, r *http.Request) {
 			id = 11
 		}
 		if id == 10 {
-			respond(w, 200, node{ID: id, Type: "project", Owner: 20, Access: json.RawMessage(`"None"`), Links: []relation{{Source: 10, Target: 11, Type: "None"}, {Source: 10, Target: 13, Type: "None"}, {Source: 10, Target: 14, Type: "None"}}})
+			respond(w, 200, node{ID: id, Name: "Gangolf", Type: "project", Owner: 20, Access: json.RawMessage(`"None"`), Links: []relation{{Source: 10, Target: 11, Type: "None"}, {Source: 10, Target: 13, Type: "None"}, {Source: 10, Target: 14, Type: "None"}}})
 		} else {
 			respond(w, 200, node{ID: id, Name: "Messages", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)})
 		}
@@ -129,7 +129,7 @@ func (f *graphFixture) serve(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		if q.Get("type") == "" {
 			if q.Get("id") == "10" {
-				project := node{ID: 10, Type: "project", Owner: 20, Access: json.RawMessage(`"None"`), Links: []relation{{Source: 10, Target: 11, Type: "None"}, {Source: 10, Target: 13, Type: "None"}, {Source: 10, Target: 14, Type: "None"}}}
+				project := node{ID: 10, Name: "Gangolf", Type: "project", Owner: 20, Access: json.RawMessage(`"None"`), Links: []relation{{Source: 10, Target: 11, Type: "None"}, {Source: 10, Target: 13, Type: "None"}, {Source: 10, Target: 14, Type: "None"}}}
 				respond(w, 200, graphPage{Result: []node{project}, Total: 1})
 				return
 			}
