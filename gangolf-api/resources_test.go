@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
@@ -182,6 +184,54 @@ func TestV3_ResolveIdentity_ExactKeysReuseFirstNameAndRecoverEmptyContent(t *tes
 		if n.Owner != 20 || !n.privateAccess() || n.Root != 10 {
 			t.Fatal("private metadata")
 		}
+	}
+}
+
+func TestGraph_PrivateDomainGroups_TypeProjectionSemantics(t *testing.T) {
+	for _, projection := range []string{"omitted", "null", "empty", "named"} {
+		t.Run(projection, func(t *testing.T) {
+			f, s := newResourceFixture(t)
+			edited := 0
+			observeIdentityWire(s, nil, func(r *http.Request, response *http.Response) {
+				if r.URL.Path != "/api/nodes" || r.URL.Query().Get("name") == "" {
+					return
+				}
+				rewriteIdentityPage(t, response, func(page map[string]json.RawMessage) {
+					var rows []map[string]json.RawMessage
+					if err := json.Unmarshal(page["result"], &rows); err != nil || len(rows) != 1 {
+						t.Fatalf("group projection rows=%v error=%v", rows, err)
+					}
+					switch projection {
+					case "omitted":
+						delete(rows[0], "type")
+					case "null":
+						rows[0]["type"] = json.RawMessage("null")
+					case "empty":
+						rows[0]["type"] = json.RawMessage(`""`)
+					case "named":
+						rows[0]["type"] = json.RawMessage(`"user"`)
+					}
+					page["result"], _ = json.Marshal(rows)
+					edited++
+				})
+			})
+			err := s.graph.privateDomainGroups(context.Background(), 20)
+			if edited == 0 || f.writes != 0 {
+				t.Fatalf("projections=%d writes=%d", edited, f.writes)
+			}
+			if projection == "omitted" || projection == "null" {
+				if err != nil || edited != 3 {
+					t.Fatalf("valid groups error=%v projections=%d", err, edited)
+				}
+				for kind, want := range map[string]int64{"user": 13, "channel": 14, "message": 11} {
+					if id, ok := s.graph.groupID(kind); !ok || id != want {
+						t.Fatalf("group %s=%d resolved=%v want=%d", kind, id, ok, want)
+					}
+				}
+			} else if err != errCorrupt {
+				t.Fatalf("non-null type accepted: %v", err)
+			}
+		})
 	}
 }
 

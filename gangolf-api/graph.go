@@ -51,7 +51,7 @@ func (n *node) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	typeValue, present := fields["type"]
-	n.TypeIsNull = present && bytes.Equal(bytes.TrimSpace(typeValue), []byte("null"))
+	n.TypeIsNull = !present || bytes.Equal(bytes.TrimSpace(typeValue), []byte("null"))
 	return nil
 }
 

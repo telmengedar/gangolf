@@ -11,12 +11,12 @@ import (
 	"testing"
 )
 
-func TestNodeDistinguishesNullTypeFromEmptyOrMissing(t *testing.T) {
+func TestNode_UnmarshalJSON_NullOrOmittedTypeIsStructural(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		data string
 		null bool
-	}{{"null", `{"type":null}`, true}, {"empty", `{"type":""}`, false}, {"missing", `{}`, false}} {
+	}{{"null", `{"type":null}`, true}, {"empty", `{"type":""}`, false}, {"missing", `{}`, true}, {"named", `{"type":"user"}`, false}} {
 		t.Run(tc.name, func(t *testing.T) {
 			var n node
 			if err := json.Unmarshal([]byte(tc.data), &n); err != nil || n.TypeIsNull != tc.null {

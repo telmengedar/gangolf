@@ -193,7 +193,7 @@ func TestV3_GroupTypeWireIntegration(t *testing.T) {
 			})
 			w := request(t, s, "POST", "/api/v3/messages", "key.secret", v3Message)
 			want := 500
-			if mode == "null" {
+			if mode == "null" || mode == "missing" {
 				want = 201
 			}
 			if !exercised || w.Code != want {
