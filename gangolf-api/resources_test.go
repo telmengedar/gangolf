@@ -220,7 +220,7 @@ func TestGraph_PrivateDomainGroups_TypeProjectionSemantics(t *testing.T) {
 				t.Fatalf("projections=%d writes=%d", edited, f.writes)
 			}
 			if projection == "omitted" || projection == "null" {
-				if err != nil || edited != 3 {
+				if err != nil || edited != 4 {
 					t.Fatalf("valid groups error=%v projections=%d", err, edited)
 				}
 				for kind, want := range map[string]int64{"user": 13, "channel": 14, "message": 11} {

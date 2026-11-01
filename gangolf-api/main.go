@@ -50,10 +50,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	check, cancel := context.WithTimeout(ctx, 30*time.Second)
-	cfg, err := handler.graph.loadConfig(check)
-	if err == nil {
-		err = handler.graph.privateDomainGroups(check, cfg.serviceOwner)
-	}
+	_, err = handler.graph.loadConfig(check)
 	cancel()
 	if err != nil {
 		return err

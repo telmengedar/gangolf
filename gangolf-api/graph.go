@@ -29,16 +29,17 @@ type graph struct {
 }
 
 type node struct {
-	ID          int64           `json:"id"`
-	Name        string          `json:"name"`
-	Owner       int64           `json:"ownerId"`
-	Links       []relation      `json:"linkDetails"`
-	Type        string          `json:"type"`
-	TypeIsNull  bool            `json:"-"`
-	Root        int64           `json:"rootNodeId"`
-	Access      json.RawMessage `json:"access"`
-	Content     *string         `json:"content"`
-	ContentType string          `json:"contentType"`
+	ID            int64           `json:"id"`
+	Name          string          `json:"name"`
+	Owner         int64           `json:"ownerId"`
+	Links         []relation      `json:"linkDetails"`
+	Type          string          `json:"type"`
+	TypeIsNull    bool            `json:"-"`
+	Root          int64           `json:"rootNodeId"`
+	Access        json.RawMessage `json:"access"`
+	Content       *string         `json:"content"`
+	ContentType   string          `json:"contentType"`
+	SkipEmbedding *bool           `json:"skipEmbedding"`
 }
 
 func (n *node) UnmarshalJSON(data []byte) error {
@@ -106,34 +107,6 @@ func (g *graph) request(ctx context.Context, method, path string, query url.Valu
 		return nil, errUnavailable
 	}
 	return data, nil
-}
-
-func (g *graph) loadConfig(ctx context.Context) (*authConfig, error) {
-	owner, err := g.serviceIdentity(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if err := g.privateContainers(ctx, owner); err != nil {
-		return nil, err
-	}
-	data, err := g.request(ctx, http.MethodGet, "/nodes/"+strconv.FormatInt(g.config, 10), nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	var n node
-	if json.Unmarshal(data, &n) != nil || n.ID != g.config || !g.privateNode(n, owner) {
-		return nil, errCorrupt
-	}
-	data, err = g.request(ctx, http.MethodGet, "/nodes/"+strconv.FormatInt(g.config, 10)+"/content", nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	var cfg authConfig
-	if json.Unmarshal(data, &cfg) != nil || !cfg.valid() {
-		return nil, errCorrupt
-	}
-	cfg.serviceOwner = owner
-	return &cfg, nil
 }
 
 func (g *graph) append(ctx context.Context, messages []message) (int64, error) {

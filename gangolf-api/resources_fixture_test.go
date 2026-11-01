@@ -39,9 +39,10 @@ func newResourceFixture(t *testing.T) (*resourceFixture, *server) {
 		10: {ID: 10, Name: "Gangolf", Type: "project", Owner: 20, Access: json.RawMessage(`"None"`)},
 		11: {ID: 11, Name: "Messages", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)},
 		13: {ID: 13, Name: "Users", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)},
+		15: {ID: 15, Name: "Configuration", SkipEmbedding: new(true), Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)},
 		14: {ID: 14, Name: "Channels", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)},
 	}, containerEdges: []relation{
-		{Source: 10, Target: 11, Type: "None"}, {Source: 10, Target: 13, Type: "None"}, {Source: 10, Target: 14, Type: "None"},
+		{Source: 10, Target: 11, Type: "None"}, {Source: 10, Target: 13, Type: "None"}, {Source: 10, Target: 14, Type: "None"}, {Source: 10, Target: 15, Type: "None"},
 	}, next: 100, identity: map[string]any{"id": 20, "enabled": true, "permissions": []string{"write"}}, pageSize: 500}
 	host := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(host.Close)
@@ -60,7 +61,7 @@ func (f *resourceFixture) inject(w http.ResponseWriter, point string) bool {
 
 func (f *resourceFixture) projection(n node) node {
 	n.Links = make([]relation, 0)
-	for _, e := range append(append([]relation{}, f.containerEdges...), f.edges...) {
+	for _, e := range append(append([]relation{{Source: 12, Target: 15, Type: "None"}}, f.containerEdges...), f.edges...) {
 		if e.Source == n.ID || e.Target == n.ID {
 			n.Links = append(n.Links, e)
 		}
@@ -164,7 +165,15 @@ func (f *resourceFixture) serve(w http.ResponseWriter, r *http.Request) {
 		if len(nameValues) == 1 {
 			nameValues = strings.Split(nameValues[0], ",")
 		}
-		all := make([]node, 0, len(f.nodes)+len(f.containers))
+		all := make([]node, 0, len(f.nodes)+len(f.containers)+1)
+		f.legacy.mu.Lock()
+		payload, _ := json.Marshal(f.legacy.cfg)
+		if f.legacy.corruptConfig {
+			payload = []byte(`{}`)
+		}
+		f.legacy.mu.Unlock()
+		content := string(payload)
+		all = append(all, node{ID: 12, Name: "Gangolf API auth — test-main", SkipEmbedding: new(true), Type: authConfigType, Root: 10, Owner: 20, Access: json.RawMessage(`"None"`), Content: &content, ContentType: "application/json"})
 		for _, n := range f.nodes {
 			all = append(all, n)
 		}
@@ -185,7 +194,7 @@ func (f *resourceFixture) serve(w http.ResponseWriter, r *http.Request) {
 			if q.Get("linkedto") != "" {
 				group, _ := strconv.ParseInt(q.Get("linkedto"), 10, 64)
 				linked := false
-				for _, e := range append(append([]relation{}, f.containerEdges...), f.edges...) {
+				for _, e := range append(append([]relation{{Source: 12, Target: 15, Type: "None"}}, f.containerEdges...), f.edges...) {
 					if e.Source == n.ID && e.Target == group || e.Target == n.ID && e.Source == group {
 						linked = true
 					}
