@@ -99,6 +99,9 @@ func (c *twitchClient) refresh(ctx context.Context, p twitchProfile, credential 
 	if err != nil {
 		return twitchCredential{}, err
 	}
+	if status == 429 || status >= 500 {
+		return twitchCredential{}, errTwitchTransport
+	}
 	if status != 200 {
 		return twitchCredential{}, errTwitchAuth
 	}

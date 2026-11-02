@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -219,7 +221,7 @@ func TestTwitchWebSocketKeepaliveExtendsLivenessButPingDoesNot(t *testing.T) {
 	}
 }
 
-func TestTwitchWebSocketReconnectTransfersSubscriptionAndKeepsOldUntilWelcome(t *testing.T) {
+func TestTwitchReconnectTransfersSubscriptionAndIgnoresReplayUntilWelcome(t *testing.T) {
 	_, _, p, event := inboundFixture(t)
 	f := newTwitchFake(t)
 	allowWelcome := make(chan struct{})
@@ -244,6 +246,7 @@ func TestTwitchWebSocketReconnectTransfersSubscriptionAndKeepsOldUntilWelcome(t 
 			reconnect.Payload.Session.ID = session
 			reconnect.Payload.Session.Status = "reconnecting"
 			reconnect.Payload.Session.ReconnectURL = strings.Replace(f.client.socketURL, "/ws", "/transfer?opaque=a%2Fb", 1)
+			socket.WriteJSON(reconnect)
 			socket.WriteJSON(reconnect)
 			socket.WriteJSON(fakeNotification(session, event))
 			close(oldEventSent)
@@ -527,5 +530,64 @@ func TestTwitchRateLimitSurvivesSocketRetryWithoutEarlyNetwork(t *testing.T) {
 	defer twitch.mu.Unlock()
 	if twitch.validationCalls != 0 || twitch.subscriptionCalls != 0 || twitch.socketCount != 0 {
 		t.Fatal("rate-limit wait made an early network request")
+	}
+}
+
+func TestTwitchSubscribeHonorsWelcomeAdvertisedDeadline(t *testing.T) {
+	_, _, p, _ := inboundFixture(t)
+	f := newTwitchFake(t)
+	f.welcome = func(e twitchEnvelope) twitchEnvelope { e.Payload.Session.KeepaliveTimeoutSeconds = 1; return e }
+	f.subscribe = func(r *http.Request, sub twitchSubscription) (int, any) {
+		time.Sleep(1300 * time.Millisecond)
+		return 202, map[string]any{"data": []twitchSubscription{fakeSubscription(sub.Transport.SessionID)}}
+	}
+	var connected atomic.Bool
+	started := time.Now()
+	err := f.client.connection(context.Background(), p, make(chan twitchEvent, 256), func() { connected.Store(true) })
+	if err == nil || connected.Load() {
+		t.Fatalf("err=%v connected=%v elapsed=%s", err, connected.Load(), time.Since(started))
+	}
+}
+
+func TestTwitchPeerEOFBeforeWelcomeRetriesReceiver(t *testing.T) {
+	f, s, p, event := inboundFixture(t)
+	twitch := newTwitchFake(t)
+	var sockets atomic.Int64
+	twitch.beforeWelcome = func(socket *websocket.Conn, path string) bool { return sockets.Add(1) == 1 }
+	twitch.socket = func(socket *websocket.Conn, session, path string) {
+		select {
+		case <-twitch.subscribed:
+		case <-time.After(3 * time.Second):
+			return
+		}
+		socket.WriteJSON(fakeNotification(session, event))
+		for {
+			if _, _, err := socket.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}
+	s.twitch = &twitchRuntime{client: twitch.client}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); s.receiveTwitch(ctx, p) }()
+	waitForTwitch(t, func() bool { state, _, _ := s.twitch.status(p.id); return state == "connected" && sockets.Load() >= 2 })
+	waitForTwitch(t, func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for _, n := range f.nodes {
+			if n.Type == "message" && n.Content != nil {
+				return true
+			}
+		}
+		return false
+	})
+	cancel()
+	<-done
+	twitch.mu.Lock()
+	defer twitch.mu.Unlock()
+	if twitch.subscriptionCalls != 1 || twitch.socketCount != 1 || sockets.Load() < 2 {
+		t.Fatalf("subscription=%d socket=%d dials=%d", twitch.subscriptionCalls, twitch.socketCount, sockets.Load())
 	}
 }

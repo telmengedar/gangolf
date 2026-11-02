@@ -30,6 +30,7 @@ type twitchFake struct {
 	subscribe         func(*http.Request, twitchSubscription) (int, any)
 	welcome           func(twitchEnvelope) twitchEnvelope
 	socket            func(*websocket.Conn, string, string)
+	beforeWelcome     func(*websocket.Conn, string) bool
 }
 
 func newTwitchFake(t *testing.T) *twitchFake {
@@ -149,6 +150,9 @@ func (f *twitchFake) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer socket.Close()
+		if f.beforeWelcome != nil && f.beforeWelcome(socket, r.URL.RequestURI()) {
+			return
+		}
 		f.mu.Lock()
 		f.socketCount++
 		session := "session-" + strconv.Itoa(f.socketCount)

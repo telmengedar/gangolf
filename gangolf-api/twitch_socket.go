@@ -19,7 +19,7 @@ func (c *twitchClient) reconnectAddress(raw string) bool {
 	return address.Scheme == "wss" && address.Host == "eventsub.wss.twitch.tv" || original.Scheme == "ws" && address.Scheme == "ws" && address.Host == original.Host && (address.Hostname() == "127.0.0.1" || address.Hostname() == "localhost" || address.Hostname() == "::1")
 }
 
-func (c *twitchClient) welcome(ctx context.Context, address string) (*websocket.Conn, twitchEnvelope, error) {
+func (c *twitchClient) welcome(ctx context.Context, address string) (*websocket.Conn, twitchEnvelope, time.Time, error) {
 	var welcome twitchEnvelope
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 	socket, response, err := dialer.DialContext(ctx, address, nil)
@@ -27,18 +27,23 @@ func (c *twitchClient) welcome(ctx context.Context, address string) (*websocket.
 		response.Body.Close()
 	}
 	if err != nil {
-		return nil, welcome, errTwitchTransport
+		return nil, welcome, time.Time{}, errTwitchTransport
 	}
 	socket.SetReadLimit(1 << 20)
 	socket.SetReadDeadline(time.Now().Add(10 * time.Second))
 	stop := context.AfterFunc(ctx, func() { socket.Close() })
 	defer stop()
 	kind, data, err := socket.ReadMessage()
-	if err != nil || kind != websocket.TextMessage || json.Unmarshal(data, &welcome) != nil || !validWelcome(welcome) {
+	receivedAt := time.Now()
+	if err != nil {
 		socket.Close()
-		return nil, welcome, errTwitchProtocol
+		return nil, welcome, time.Time{}, errTwitchTransport
 	}
-	return socket, welcome, nil
+	if kind != websocket.TextMessage || json.Unmarshal(data, &welcome) != nil || !validWelcome(welcome) {
+		socket.Close()
+		return nil, welcome, time.Time{}, errTwitchProtocol
+	}
+	return socket, welcome, receivedAt, nil
 }
 
 func validWelcome(e twitchEnvelope) bool {
@@ -83,7 +88,7 @@ func (c *twitchClient) connection(ctx context.Context, p twitchProfile, queue ch
 	if err != nil {
 		return err
 	}
-	socket, welcome, err := c.welcome(ctx, c.socketURL)
+	socket, welcome, welcomeAt, err := c.welcome(ctx, c.socketURL)
 	if err != nil {
 		return err
 	}
@@ -92,7 +97,12 @@ func (c *twitchClient) connection(ctx context.Context, p twitchProfile, queue ch
 	defer func() { socket.Close() }()
 	frames := make(chan twitchFrame)
 	go readTwitchFrames(child, socket, welcome, frames)
-	subscriptionCtx, finish := context.WithTimeout(ctx, 10*time.Second)
+	welcomeDeadline := welcomeAt.Add(time.Duration(welcome.Payload.Session.KeepaliveTimeoutSeconds) * time.Second)
+	subscriptionTimeout := min(10*time.Second, time.Until(welcomeDeadline))
+	if subscriptionTimeout <= 0 {
+		return errTwitchTransport
+	}
+	subscriptionCtx, finish := context.WithTimeout(ctx, subscriptionTimeout)
 	subscriptionID, err := c.subscribe(subscriptionCtx, p, welcome.Payload.Session.ID, &credential)
 	finish()
 	if err != nil {
@@ -115,6 +125,8 @@ func (c *twitchClient) connection(ctx context.Context, p twitchProfile, queue ch
 		}
 	}()
 	transferring := false
+	var transferID, transferSession, transferURL string
+	var transferSocket *websocket.Conn
 	for {
 		select {
 		case <-ctx.Done():
@@ -135,6 +147,7 @@ func (c *twitchClient) connection(ctx context.Context, p twitchProfile, queue ch
 			old := socket
 			socket = next.connection
 			welcome = next.envelope
+			welcomeAt = next.receivedAt
 			old.Close()
 			go readTwitchFrames(child, socket, welcome, frames)
 		case frame := <-frames:
@@ -165,16 +178,20 @@ func (c *twitchClient) connection(ctx context.Context, p twitchProfile, queue ch
 					return errTwitchOverflow
 				}
 			case "session_reconnect":
-				if transferring || frame.connection != socket || e.Payload.Session.ID != frame.session || e.Payload.Session.Status != "reconnecting" || !c.reconnectAddress(e.Payload.Session.ReconnectURL) {
+				address := e.Payload.Session.ReconnectURL
+				if frame.connection == transferSocket && frame.session == transferSession && e.Metadata.MessageID == transferID && address == transferURL {
+					continue
+				}
+				if transferring || frame.connection != socket || e.Payload.Session.ID != frame.session || e.Payload.Session.Status != "reconnecting" || !c.reconnectAddress(address) {
 					return errTwitchProtocol
 				}
 				transferring = true
-				address := e.Payload.Session.ReconnectURL
+				transferID, transferSession, transferURL, transferSocket = e.Metadata.MessageID, frame.session, address, socket
 				handovers.Add(1)
 				go func() {
 					defer handovers.Done()
-					next, hello, err := c.welcome(child, address)
-					result := twitchFrame{connection: next, envelope: hello, err: err}
+					next, hello, receivedAt, err := c.welcome(child, address)
+					result := twitchFrame{connection: next, envelope: hello, receivedAt: receivedAt, err: err}
 					select {
 					case replacement <- result:
 					case <-child.Done():

@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"github.com/gorilla/websocket"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -256,5 +259,82 @@ func TestTwitchRetryAfterAndRateResetAreHonored(t *testing.T) {
 		if got := retryDelay(test.headers, now); got != test.want {
 			t.Fatalf("got=%s want=%s", got, test.want)
 		}
+	}
+}
+
+func TestTwitchRefreshTransientResponsesRemainRetryable(t *testing.T) {
+	for _, status := range []int{429, 503} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			_, _, p, _ := inboundFixture(t)
+			f := newTwitchFake(t)
+			f.validate = func(*http.Request) (int, any) { return 401, map[string]any{} }
+			f.refresh = func(*http.Request) (int, any) { return status, map[string]any{} }
+			_, err := f.client.authorize(context.Background(), p)
+			if !errors.Is(err, errTwitchTransport) {
+				t.Fatalf("status %d classified %v", status, err)
+			}
+		})
+	}
+}
+
+func TestTwitchRefreshTransientResponsesRetryUntilRecovered(t *testing.T) {
+	for _, status := range []int{429, 503} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			_, s, p, _ := inboundFixture(t)
+			twitch := newTwitchFake(t)
+			twitch.socket = func(socket *websocket.Conn, session, path string) {
+				select {
+				case <-twitch.subscribed:
+				case <-time.After(3 * time.Second):
+					return
+				}
+				go func() {
+					for {
+						if _, _, err := socket.ReadMessage(); err != nil {
+							return
+						}
+					}
+				}()
+				ticker := time.NewTicker(100 * time.Millisecond)
+				defer ticker.Stop()
+				for range ticker.C {
+					if socket.WriteJSON(fakeEnvelope("session_keepalive")) != nil {
+						return
+					}
+				}
+			}
+			var refreshes atomic.Int64
+			twitch.validate = func(r *http.Request) (int, any) {
+				if r.Header.Get("Authorization") == "OAuth local-access" {
+					return 401, map[string]any{}
+				}
+				return 200, map[string]any{"client_id": "testclient", "user_id": "900", "scopes": []string{"user:read:chat"}, "expires_in": 3600}
+			}
+			twitch.refresh = func(*http.Request) (int, any) {
+				if refreshes.Add(1) == 1 {
+					return status, map[string]any{}
+				}
+				return 200, map[string]any{"access_token": "rotated-access", "refresh_token": "rotated-refresh"}
+			}
+			s.twitch = &twitchRuntime{client: twitch.client}
+			ctx, cancel := context.WithCancel(context.Background())
+			ticks := make(chan time.Time)
+			done := make(chan struct{})
+			go func() { defer close(done); s.reconcileTwitch(ctx, ticks) }()
+			defer func() { cancel(); <-done }()
+			waitForTwitch(t, func() bool { return refreshes.Load() >= 1 })
+			select {
+			case ticks <- time.Now():
+			case <-time.After(time.Second):
+				t.Fatal("reconcile blocked")
+			}
+			waitForTwitch(t, func() bool { state, _, _ := s.twitch.status(p.id); return state == "connected" })
+			twitch.mu.Lock()
+			validations, subscriptions := twitch.validationCalls, twitch.subscriptionCalls
+			twitch.mu.Unlock()
+			if refreshes.Load() < 2 || validations < 3 || subscriptions < 1 {
+				t.Fatalf("refreshes=%d validations=%d subscriptions=%d", refreshes.Load(), validations, subscriptions)
+			}
+		})
 	}
 }
