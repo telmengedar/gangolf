@@ -57,10 +57,6 @@ func (s *server) v3(ctx context.Context, w http.ResponseWriter, r *http.Request)
 		storageFailure(w, err)
 		return
 	}
-	if err := s.graph.privateDomainGroups(ctx, cfg.serviceOwner); err != nil {
-		storageFailure(w, err)
-		return
-	}
 	if status := s.authorize(ctx, r, cfg, token, queryKey); status != 0 {
 		code := "unauthorized"
 		if status == 403 {

@@ -86,7 +86,7 @@ func (f *graphFixture) serve(w http.ResponseWriter, r *http.Request) {
 			id = 11
 		}
 		if id == 10 {
-			respond(w, 200, node{ID: id, Name: "Gangolf", Type: "project", Owner: 20, Access: json.RawMessage(`"None"`), Links: []relation{{Source: 10, Target: 11, Type: "None"}, {Source: 10, Target: 13, Type: "None"}, {Source: 10, Target: 14, Type: "None"}}})
+			respond(w, 200, node{ID: id, Name: "Gangolf", Type: "project", Owner: 20, Access: json.RawMessage(`"None"`), Links: []relation{{Source: 10, Target: 11, Type: "None"}, {Source: 10, Target: 13, Type: "None"}, {Source: 10, Target: 14, Type: "None"}, {Source: 10, Target: 15, Type: "None"}}})
 		} else {
 			respond(w, 200, node{ID: id, Name: "Messages", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)})
 		}
@@ -127,16 +127,31 @@ func (f *graphFixture) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/api/nodes" && r.Method == "GET" {
 		q := r.URL.Query()
+		if q.Get("type") == authConfigType {
+			if q.Get("rootNodeId") != "10" || q.Get("linkedto") != "" && q.Get("linkedto") != "15" || q.Get("id") != "" && (q.Get("id") != "12" || q.Get("linkedto") != "15") || q.Get("name") != "" && q.Get("name") != "Gangolf API auth — test-main" {
+				w.WriteHeader(400)
+				return
+			}
+			payload, _ := json.Marshal(f.cfg)
+			if f.corruptConfig {
+				payload = []byte(`{}`)
+			}
+			content := string(payload)
+			n := node{ID: 12, Name: "Gangolf API auth — test-main", SkipEmbedding: new(true), Type: authConfigType, Root: 10, Owner: 20, Access: json.RawMessage(`"None"`), Content: &content, ContentType: "application/json", Links: []relation{{Source: 12, Target: 15, Type: "None"}}}
+			respond(w, 200, graphPage{Result: []node{n}, Total: 1})
+			return
+		}
 		if q.Get("type") == "" {
 			if q.Get("id") == "10" {
-				project := node{ID: 10, Name: "Gangolf", Type: "project", Owner: 20, Access: json.RawMessage(`"None"`), Links: []relation{{Source: 10, Target: 11, Type: "None"}, {Source: 10, Target: 13, Type: "None"}, {Source: 10, Target: 14, Type: "None"}}}
+				project := node{ID: 10, Name: "Gangolf", Type: "project", Owner: 20, Access: json.RawMessage(`"None"`), Links: []relation{{Source: 10, Target: 11, Type: "None"}, {Source: 10, Target: 13, Type: "None"}, {Source: 10, Target: 14, Type: "None"}, {Source: 10, Target: 15, Type: "None"}}}
 				respond(w, 200, graphPage{Result: []node{project}, Total: 1})
 				return
 			}
 			groups := map[string]node{
-				"Users":    {ID: 13, Name: "Users", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`), Links: []relation{{Source: 10, Target: 13, Type: "None"}}},
-				"Channels": {ID: 14, Name: "Channels", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`), Links: []relation{{Source: 10, Target: 14, Type: "None"}}},
-				"Messages": {ID: 11, Name: "Messages", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`), Links: []relation{{Source: 10, Target: 11, Type: "None"}}},
+				"Configuration": {ID: 15, Name: "Configuration", SkipEmbedding: new(true), Root: 10, Owner: 20, Access: json.RawMessage(`"None"`), Links: []relation{{Source: 10, Target: 15, Type: "None"}}},
+				"Users":         {ID: 13, Name: "Users", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`), Links: []relation{{Source: 10, Target: 13, Type: "None"}}},
+				"Channels":      {ID: 14, Name: "Channels", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`), Links: []relation{{Source: 10, Target: 14, Type: "None"}, {Source: 10, Target: 15, Type: "None"}}},
+				"Messages":      {ID: 11, Name: "Messages", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`), Links: []relation{{Source: 10, Target: 11, Type: "None"}}},
 			}
 			if q.Get("rootNodeId") != "10" {
 				w.WriteHeader(400)

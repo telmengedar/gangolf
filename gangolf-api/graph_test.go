@@ -60,7 +60,32 @@ func TestGraph_PrivateAccessWireMetadata_EnforcesExplicitPrivateValues(t *testin
 	for _, tc := range cases {
 		for _, operation := range []string{"config", "append", "list"} {
 			t.Run(tc.name+"/"+operation, func(t *testing.T) {
-				f, s := newFixture(t)
+				if operation == "config" {
+					f, s := newResourceFixture(t)
+					reads := 0
+					f.corrupt = func(n *node) {
+						if n.ID == 12 {
+							reads++
+							n.Access = nil
+							if tc.field != "" {
+								var metadata node
+								if err := json.Unmarshal([]byte(`{"id":12`+tc.field+`}`), &metadata); err != nil {
+									t.Fatal(err)
+								}
+								n.Access = metadata.Access
+							}
+						}
+					}
+					cfg, err := s.graph.loadConfig(context.Background())
+					if reads == 0 || f.writes != 0 {
+						t.Fatalf("config reads=%d writes=%d", reads, f.writes)
+					}
+					if tc.private && (err != nil || cfg == nil) || !tc.private && (err != errCorrupt || cfg != nil) {
+						t.Fatalf("private=%v error=%v", tc.private, err)
+					}
+					return
+				}
+				_, s := newFixture(t)
 				var m message
 				if err := json.Unmarshal([]byte(testMessage), &m); err != nil {
 					t.Fatal(err)
@@ -74,24 +99,10 @@ func TestGraph_PrivateAccessWireMetadata_EnforcesExplicitPrivateValues(t *testin
 				if err != nil {
 					t.Fatal(err)
 				}
-				metadataReads, contentReads, creates, links, uploads := 0, 0, 0, 0, 0
+				metadataReads, creates, links, uploads := 0, 0, 0, 0
 				host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.Header().Set("Content-Type", "application/json")
 					switch {
-					case r.URL.Path == "/users/me":
-						respond(w, 200, map[string]any{"id": 20, "enabled": true, "permissions": []string{"write"}})
-					case r.URL.Path == "/nodes/10" || r.URL.Path == "/nodes/11":
-						id := int64(10)
-						if r.URL.Path == "/nodes/11" {
-							id = 11
-						}
-						respond(w, 200, node{ID: id, Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)})
-					case r.Method == "GET" && r.URL.Path == "/nodes/12":
-						metadataReads++
-						fmt.Fprintf(w, `{"id":12,"rootNodeId":10,"ownerId":20%s}`, tc.field)
-					case r.Method == "GET" && r.URL.Path == "/nodes/12/content":
-						contentReads++
-						respond(w, 200, f.cfg)
 					case r.Method == "POST" && r.URL.Path == "/nodes":
 						creates++
 						fmt.Fprintf(w, `{"id":100,"type":"gangolf-message-batch","rootNodeId":10%s}`, tc.field)
@@ -113,12 +124,6 @@ func TestGraph_PrivateAccessWireMetadata_EnforcesExplicitPrivateValues(t *testin
 					t.Fatal(err)
 				}
 				switch operation {
-				case "config":
-					var cfg *authConfig
-					cfg, err = s.graph.loadConfig(context.Background())
-					if metadataReads != 1 || tc.private && (cfg == nil || contentReads != 1) || !tc.private && (cfg != nil || contentReads != 0) {
-						t.Fatal("config access gate did not control content loading")
-					}
 				case "append":
 					var id int64
 					id, err = s.graph.append(context.Background(), []message{m})

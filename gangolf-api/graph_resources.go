@@ -93,24 +93,28 @@ func exactMembership(n node, group int64) bool {
 
 func (g *graph) groupByName(ctx context.Context, name string, owner int64) (node, error) {
 	result := make([]node, 0, 1)
-	offset := 0
+	offset, total := 0, -1
+	var last int64
 	for {
-		q := url.Values{"rootNodeId": {strconv.FormatInt(g.root, 10)}, "name": {name}, "fields": {"id,name,type,rootNodeId,ownerId,access,linkDetails"}, "sort": {"id"}, "descending": {"false"}, "count": {"500"}, "continue": {strconv.Itoa(offset)}}
+		q := url.Values{"rootNodeId": {strconv.FormatInt(g.root, 10)}, "name": {name}, "fields": {"id,name,type,rootNodeId,ownerId,access,skipEmbedding,linkDetails"}, "sort": {"id"}, "descending": {"false"}, "count": {"500"}, "continue": {strconv.Itoa(offset)}}
 		data, err := g.request(ctx, http.MethodGet, "/nodes", q, nil)
 		if err != nil {
 			return node{}, err
 		}
 		var page graphPage
-		if json.Unmarshal(data, &page) != nil || page.Result == nil || page.Total < 0 {
+		if json.Unmarshal(data, &page) != nil || page.Result == nil || page.Total < 0 || total >= 0 && total != page.Total {
 			return node{}, errCorrupt
 		}
+		total = page.Total
 		for _, n := range page.Result {
-			if n.Name == name {
-				result = append(result, n)
+			if n.ID <= last || n.Name != name {
+				return node{}, errCorrupt
 			}
+			last = n.ID
+			result = append(result, n)
 		}
 		next := offset + len(page.Result)
-		if page.Continue != nil && (*page.Continue != next || next <= offset) {
+		if next > total || (page.Continue != nil) != (next < total) || page.Continue != nil && (*page.Continue != next || next <= offset) {
 			return node{}, errCorrupt
 		}
 		if page.Continue == nil && next >= page.Total {
@@ -131,20 +135,6 @@ func (g *graph) groupByName(ctx context.Context, name string, owner int64) (node
 	return n, nil
 }
 
-func (g *graph) privateContainers(ctx context.Context, owner int64) error {
-	for _, id := range []int64{g.root, g.group} {
-		data, err := g.request(ctx, http.MethodGet, nodePath(id), nil, nil)
-		if err != nil {
-			return err
-		}
-		var n node
-		if json.Unmarshal(data, &n) != nil || n.ID != id || n.Owner != owner || !n.privateAccess() || id == g.group && n.Root != g.root {
-			return errCorrupt
-		}
-	}
-	return nil
-}
-
 func (g *graph) privateDomainGroups(ctx context.Context, owner int64) error {
 	q := url.Values{"id": {strconv.FormatInt(g.root, 10)}, "fields": {"id,name,type,ownerId,access,linkDetails"}, "count": {"2"}}
 	data, err := g.request(ctx, http.MethodGet, "/nodes", q, nil)
@@ -159,14 +149,17 @@ func (g *graph) privateDomainGroups(ctx context.Context, owner int64) error {
 	if project.ID != g.root || project.Type != "project" || project.Name != "Gangolf" || project.Owner != owner || !project.privateAccess() {
 		return errCorrupt
 	}
-	resolved := make(map[string]int64, 3)
-	for _, kind := range []string{"user", "channel", "message"} {
+	resolved := make(map[string]int64, 4)
+	for _, kind := range []string{"user", "channel", "message", "configuration"} {
 		name, _ := domainGroup(kind)
+		if kind == "configuration" {
+			name = "Configuration"
+		}
 		container, err := g.groupByName(ctx, name, owner)
 		if err != nil {
 			return err
 		}
-		if !plainLinkBetween(project.Links, g.root, container.ID) {
+		if container.ID == g.root || !plainLinkBetween(project.Links, g.root, container.ID) || kind == "configuration" && (container.SkipEmbedding == nil || !*container.SkipEmbedding) {
 			return errCorrupt
 		}
 		if kind == "message" && container.ID != g.group {
@@ -210,11 +203,21 @@ func (g *graph) identityIntegrity(ctx context.Context, kind, name string, owner 
 }
 
 func (g *graph) queryResourceNodes(ctx context.Context, kind, name string, owner, group int64) ([]node, error) {
+	return g.queryResourceItem(ctx, kind, name, owner, group, 0)
+}
+
+func (g *graph) queryResourceItem(ctx context.Context, kind, name string, owner, group, id int64) ([]node, error) {
 	result := make([]node, 0)
 	offset, total := 0, -1
 	var last int64
 	for {
 		q := url.Values{"rootNodeId": {strconv.FormatInt(g.root, 10)}, "type": {kind}, "fields": {"id,name,type,rootNodeId,ownerId,access,content,contentType,linkDetails"}, "sort": {"id"}, "descending": {"false"}, "count": {"500"}, "continue": {strconv.Itoa(offset)}}
+		if kind == authConfigType {
+			q.Set("fields", q.Get("fields")+",skipEmbedding")
+		}
+		if id > 0 {
+			q.Set("id", strconv.FormatInt(id, 10))
+		}
 		if group > 0 {
 			q.Set("linkedto", strconv.FormatInt(group, 10))
 		}
@@ -235,7 +238,7 @@ func (g *graph) queryResourceNodes(ctx context.Context, kind, name string, owner
 		}
 		total = *page.Total
 		for _, n := range page.Result {
-			if n.ID <= last || n.Type != kind || !g.privateNode(n, owner) || n.Links == nil || name != "" && n.Name != name || group > 0 && !exactMembership(n, group) {
+			if n.ID <= last || id > 0 && n.ID != id || n.Type != kind || !g.privateNode(n, owner) || n.Links == nil || name != "" && n.Name != name || group > 0 && !exactMembership(n, group) {
 				return nil, errCorrupt
 			}
 			last = n.ID
