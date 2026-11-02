@@ -65,6 +65,10 @@ func (g *graph) loadConfig(ctx context.Context) (*authConfig, error) {
 	if err != nil || mediaType != "application/json" || n.Content == nil || strictJSON([]byte(*n.Content), &cfg) != nil || !cfg.valid() {
 		return nil, errCorrupt
 	}
+	cfg.twitch, err = g.loadTwitchProfiles(ctx, owner, n)
+	if err != nil {
+		return nil, err
+	}
 	cfg.serviceOwner = owner
 	return &cfg, nil
 }

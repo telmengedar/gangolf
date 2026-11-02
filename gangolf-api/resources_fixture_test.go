@@ -35,6 +35,9 @@ type resourceFixture struct {
 func newResourceFixture(t *testing.T) (*resourceFixture, *server) {
 	t.Helper()
 	legacy, s := newFixture(t)
+	key := legacy.cfg.APIKeys["key"]
+	key.Permissions = []string{"admin"}
+	legacy.cfg.APIKeys["key"] = key
 	f := &resourceFixture{legacy: legacy, nodes: make(map[int64]node), containers: map[int64]node{
 		10: {ID: 10, Name: "Gangolf", Type: "project", Owner: 20, Access: json.RawMessage(`"None"`)},
 		11: {ID: 11, Name: "Messages", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)},

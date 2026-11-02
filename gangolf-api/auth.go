@@ -34,6 +34,7 @@ type keyGrant struct {
 
 type authConfig struct {
 	serviceOwner  int64
+	twitch        []twitchProfile
 	SchemaVersion int                 `json:"schemaVersion"`
 	Issuer        string              `json:"issuer"`
 	Audience      string              `json:"audience"`
@@ -82,7 +83,7 @@ func credential(r *http.Request) (string, bool) {
 	return "", false
 }
 
-func (s *server) authorize(ctx context.Context, r *http.Request, c *authConfig, token string, queryKey bool) int {
+func (s *server) authorize(ctx context.Context, r *http.Request, c *authConfig, token string, queryKey bool) (principal, int) {
 	if strings.Count(token, ".") == 2 && !queryKey {
 		claims := jwt.MapClaims{}
 		_, err := jwt.ParseWithClaims(token, claims, func(t *jwt.Token) (any, error) {
@@ -94,14 +95,14 @@ func (s *server) authorize(ctx context.Context, r *http.Request, c *authConfig, 
 		}, jwt.WithValidMethods([]string{"RS256"}), jwt.WithIssuer(c.Issuer), jwt.WithAudience(c.Audience), jwt.WithExpirationRequired(), jwt.WithLeeway(2*time.Minute), jwt.WithTimeFunc(s.now), jwt.WithJSONNumber())
 		if err != nil {
 			if errors.Is(err, errUnavailable) {
-				return http.StatusServiceUnavailable
+				return principal{}, http.StatusServiceUnavailable
 			}
-			return http.StatusUnauthorized
+			return principal{}, http.StatusUnauthorized
 		}
 		notBefore, _ := claims.GetNotBefore()
 		expires, _ := claims.GetExpirationTime()
 		if notBefore != nil && notBefore.After(expires.Time) {
-			return http.StatusUnauthorized
+			return principal{}, http.StatusUnauthorized
 		}
 		var id string
 		switch value := claims[c.UserIDClaim].(type) {
@@ -110,36 +111,36 @@ func (s *server) authorize(ctx context.Context, r *http.Request, c *authConfig, 
 		case json.Number:
 			id = value.String()
 		default:
-			return http.StatusForbidden
+			return principal{}, http.StatusForbidden
 		}
 		n, err := strconv.ParseInt(id, 10, 64)
 		if err != nil {
-			return http.StatusForbidden
+			return principal{}, http.StatusForbidden
 		}
 		u, ok := c.Users[strconv.FormatInt(n, 10)]
 		if !ok || !u.Enabled || !hasHost(u.Permissions) {
-			return http.StatusForbidden
+			return principal{}, http.StatusForbidden
 		}
-		return 0
+		return principal{UserID: strconv.FormatInt(n, 10), Permissions: u.Permissions}, 0
 	}
 	id, secret, ok := strings.Cut(token, ".")
 	if !ok || id == "" || secret == "" {
-		return http.StatusUnauthorized
+		return principal{}, http.StatusUnauthorized
 	}
 	k, ok := c.APIKeys[id]
 	h := hmac.New(sha256.New, []byte(s.pepper))
 	h.Write([]byte(token))
 	if !ok || !hmac.Equal(h.Sum(nil), k.Hash) || !k.Enabled || k.ExpiresAt != nil && k.ExpiresAt.Before(s.now()) {
-		return http.StatusUnauthorized
+		return principal{}, http.StatusUnauthorized
 	}
 	user, ok := c.Users[k.UserID]
 	if !ok || !user.Enabled {
-		return http.StatusUnauthorized
+		return principal{}, http.StatusUnauthorized
 	}
 	if !hasHost(k.Permissions) {
-		return http.StatusForbidden
+		return principal{}, http.StatusForbidden
 	}
-	return 0
+	return principal{UserID: k.UserID, Permissions: k.Permissions}, 0
 }
 
 func (s *server) jwtKey(ctx context.Context, target, kid string) (*rsa.PublicKey, error) {

@@ -57,7 +57,8 @@ func (s *server) v3(ctx context.Context, w http.ResponseWriter, r *http.Request)
 		storageFailure(w, err)
 		return
 	}
-	if status := s.authorize(ctx, r, cfg, token, queryKey); status != 0 {
+	p, status := s.authorize(ctx, r, cfg, token, queryKey)
+	if status != 0 {
 		code := "unauthorized"
 		if status == 403 {
 			code = "forbidden"
@@ -67,12 +68,13 @@ func (s *server) v3(ctx context.Context, w http.ResponseWriter, r *http.Request)
 		failure(w, status, code)
 		return
 	}
+	policy := s.policy(p, cfg)
 	if r.Method == http.MethodPost {
-		s.createV3(ctx, w, r, cfg.serviceOwner)
+		s.createV3(ctx, w, r, cfg.serviceOwner, policy)
 		return
 	}
 	if !item {
-		s.listV3(ctx, w, r, cfg.serviceOwner)
+		s.listV3(ctx, w, r, cfg.serviceOwner, policy)
 		return
 	}
 	q, err := url.ParseQuery(r.URL.RawQuery)
@@ -102,7 +104,15 @@ func (s *server) v3(ctx context.Context, w http.ResponseWriter, r *http.Request)
 		return
 	}
 	m, found := all[id]
-	if !found || m.Deleted && r.Method != http.MethodDelete {
+	visible := false
+	if found {
+		visible, err = policy.visibleV3(ctx, s.graph, m, cfg.serviceOwner)
+		if err != nil {
+			storageFailure(w, err)
+			return
+		}
+	}
+	if !visible || !found || m.Deleted && r.Method != http.MethodDelete {
 		failure(w, 404, "not_found")
 		return
 	}
@@ -147,7 +157,7 @@ func resourceBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	return data, true
 }
 
-func (s *server) createV3(ctx context.Context, w http.ResponseWriter, r *http.Request, owner int64) {
+func (s *server) createV3(ctx context.Context, w http.ResponseWriter, r *http.Request, owner int64, policy messagePolicy) {
 	if r.URL.RawQuery != "" {
 		failure(w, 400, "invalid_filter")
 		return
@@ -169,6 +179,10 @@ func (s *server) createV3(ctx context.Context, w http.ResponseWriter, r *http.Re
 		failure(w, 400, "invalid_message")
 		return
 	}
+	if strings.EqualFold(input.Service, "Twitch") && !policy.principal.admin() {
+		failure(w, 403, "forbidden")
+		return
+	}
 	var parent messageContent
 	if input.ReplyTo != nil {
 		pid, ok := resourceID(*input.ReplyTo)
@@ -183,7 +197,7 @@ func (s *server) createV3(ctx context.Context, w http.ResponseWriter, r *http.Re
 		}
 		var found bool
 		parent, found = all[pid]
-		if !found || parent.Deleted {
+		if !found || parent.Deleted || !policy.visible(parent.Service, parent.Channel, parent.ChannelID) {
 			failure(w, 404, "not_found")
 			return
 		}
@@ -242,7 +256,7 @@ func applyMessagePatch(m messageContent, operations []patchOperation) (messageCo
 	return m, (message{Service: m.Service, Channel: m.Channel, User: *m.User, Chunks: m.Chunks, TTS: *m.TTS}).valid()
 }
 
-func (s *server) listV3(ctx context.Context, w http.ResponseWriter, r *http.Request, owner int64) {
+func (s *server) listV3(ctx context.Context, w http.ResponseWriter, r *http.Request, owner int64, policy messagePolicy) {
 	q, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil {
 		failure(w, 400, "invalid_filter")
@@ -275,6 +289,9 @@ func (s *server) listV3(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	}
 	result := make([]messageResource, 0)
 	for id, m := range all {
+		if !policy.visible(m.Service, m.Channel, m.ChannelID) {
+			continue
+		}
 		if m.Deleted || !f.from.IsZero() && m.Time.Before(f.from) || !f.to.IsZero() && !m.Time.Before(f.to) || f.service != "" && m.Service != f.service || f.channel != "" && m.Channel != f.channel || ids["userId"] != "" && m.UserID != ids["userId"] || ids["channelId"] != "" && m.ChannelID != ids["channelId"] || ids["replyTo"] != "" && (m.ReplyTo == nil || *m.ReplyTo != ids["replyTo"]) {
 			continue
 		}
