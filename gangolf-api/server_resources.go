@@ -132,7 +132,7 @@ func (s *server) v3(ctx context.Context, w http.ResponseWriter, r *http.Request)
 		respond(w, 200, updated.resource(id))
 	case http.MethodDelete:
 		if !m.Deleted {
-			tombstone := messageContent{SchemaVersion: 1, Deleted: true, Time: m.Time, UserID: m.UserID, ChannelID: m.ChannelID, ReplyTo: m.ReplyTo}
+			tombstone := messageContent{SchemaVersion: m.SchemaVersion, Source: m.Source.tombstone(), Deleted: true, Time: m.Time, UserID: m.UserID, ChannelID: m.ChannelID, ReplyTo: m.ReplyTo}
 			if err := s.graph.replaceContent(ctx, id, tombstone); err != nil {
 				storageFailure(w, errOutcomeUnknown)
 				return
@@ -253,7 +253,7 @@ func applyMessagePatch(m messageContent, operations []patchOperation) (messageCo
 			return m, false
 		}
 	}
-	return m, (message{Service: m.Service, Channel: m.Channel, User: *m.User, Chunks: m.Chunks, TTS: *m.TTS}).valid()
+	return m, (message{Service: m.Service, Channel: m.Channel, User: *m.User, Chunks: m.Chunks, TTS: *m.TTS}).validText(m.SchemaVersion == 2)
 }
 
 func (s *server) listV3(ctx context.Context, w http.ResponseWriter, r *http.Request, owner int64, policy messagePolicy) {

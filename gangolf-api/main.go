@@ -35,6 +35,7 @@ func bootstrap() (*server, string, error) {
 	}
 	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	s := &server{graph: &graph{base: base, token: token, root: ids[0], group: ids[1], config: ids[2], http: client}, pepper: pepper, now: time.Now}
+	s.twitch = &twitchRuntime{client: productionTwitchClient(os.Getenv("GANGOLF_TWITCH_CREDENTIAL_DIR"))}
 	addr := os.Getenv("GANGOLF_LISTEN")
 	if addr == "" {
 		addr = "127.0.0.1:8080"
@@ -55,6 +56,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	receiverDone := make(chan struct{})
+	go func() { defer close(receiverDone); handler.runTwitch(ctx) }()
+	defer func() { stop(); <-receiverDone }()
 	srv := &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 35 * time.Second, WriteTimeout: 35 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	done := make(chan error, 1)
 	go func() { done <- srv.ListenAndServe() }()

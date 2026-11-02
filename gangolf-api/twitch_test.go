@@ -123,8 +123,8 @@ func TestTwitchConfigProfilesAndSemanticEdges(t *testing.T) {
 				f.nodes[30] = n
 			}
 			cfg, err := s.graph.loadConfig(context.Background())
-			if change == "valid" {
-				if err != nil || len(cfg.twitch) != 1 || *cfg.twitch[0].Enabled {
+			if change == "valid" || change == "enabled" {
+				if err != nil || len(cfg.twitch) != 1 || *cfg.twitch[0].Enabled != (change == "enabled") {
 					t.Fatalf("config=%+v err=%v", cfg, err)
 				}
 			} else if err != errCorrupt || cfg != nil {
@@ -254,7 +254,7 @@ func TestTwitchChannelsHeaderAuthRedactionAndEffectiveGrants(t *testing.T) {
 			t.Fatalf("profiles=%s", w.Body.String())
 		}
 		for _, profile := range result.Result {
-			if profile["state"] != "disabled" || profile["enabled"] != false || len(profile) != 6 {
+			if profile["state"] != "disabled" || profile["enabled"] != false || len(profile) != 8 {
 				t.Fatalf("profile=%v", profile)
 			}
 		}

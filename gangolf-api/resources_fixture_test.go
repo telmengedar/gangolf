@@ -118,12 +118,7 @@ func (f *resourceFixture) serve(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(400)
 			return
 		}
-		if n.Type == batchType {
-			body, _ := json.Marshal(n)
-			r.Body = io.NopCloser(strings.NewReader(string(body)))
-			f.legacy.serve(w, r.Clone(r.Context()))
-			return
-		}
+
 		f.writes++
 		if f.inject(w, "create:"+n.Type) {
 			return
@@ -138,7 +133,7 @@ func (f *resourceFixture) serve(w http.ResponseWriter, r *http.Request) {
 		respond(w, 200, f.projection(created))
 		return
 	}
-	if r.URL.Path == "/api/nodes" && r.Method == "GET" && r.URL.Query().Get("type") != batchType {
+	if r.URL.Path == "/api/nodes" && r.Method == "GET" {
 		if f.inject(w, "list") {
 			return
 		}
@@ -146,8 +141,11 @@ func (f *resourceFixture) serve(w http.ResponseWriter, r *http.Request) {
 		if kind := q.Get("type"); kind == "user" || kind == "channel" || kind == "message" {
 			group := map[string]string{"user": "13", "channel": "14", "message": "11"}[kind]
 			integrity := false
-			if (kind == "user" || kind == "channel") && len(q["name"]) == 1 && len(q["linkedto"]) == 0 {
+			if (kind == "user" || kind == "channel" || kind == "message") && len(q["name"]) == 1 && len(q["linkedto"]) == 0 {
 				prefix := "gangolf-" + kind + ":"
+				if kind == "message" {
+					prefix = "gangolf-twitch-message:"
+				}
 				data, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(q.Get("name"), prefix))
 				var tuple []string
 				integrity = strings.HasPrefix(q.Get("name"), prefix) && err == nil && json.Unmarshal(data, &tuple) == nil && len(tuple) == 2
@@ -158,7 +156,7 @@ func (f *resourceFixture) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			f.queries = append(f.queries, q)
 		}
-		if !strings.Contains(q.Get("fields"), "ownerId") || !strings.Contains(q.Get("fields"), "linkDetails") {
+		if q.Get("type") != batchType && (!strings.Contains(q.Get("fields"), "ownerId") || !strings.Contains(q.Get("fields"), "linkDetails")) {
 			w.WriteHeader(400)
 			return
 		}

@@ -14,6 +14,7 @@ import (
 )
 
 type server struct {
+	twitch *twitchRuntime
 	graph  *graph
 	pepper string
 	now    func() time.Time
@@ -81,6 +82,13 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if token == "" {
 		failure(w, 401, "unauthorized")
 		return
+	}
+	if r.Method == http.MethodPost {
+		if err := lockResources(ctx); err != nil {
+			storageFailure(w, err)
+			return
+		}
+		defer resourceLock.Unlock()
 	}
 	cfg, err := s.graph.loadConfig(ctx)
 	if err != nil {

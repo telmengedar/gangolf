@@ -47,7 +47,7 @@ func positiveDecimal(s string) bool {
 func decodeTwitchProfile(n node) (twitchProfile, error) {
 	var p twitchProfile
 	media, _, err := mime.ParseMediaType(n.ContentType)
-	if err != nil || media != "application/json" || n.Content == nil || strictJSON([]byte(*n.Content), &p) != nil || p.SchemaVersion != 1 || p.Enabled == nil || *p.Enabled || n.SkipEmbedding == nil || !*n.SkipEmbedding {
+	if err != nil || media != "application/json" || n.Content == nil || strictJSON([]byte(*n.Content), &p) != nil || p.SchemaVersion != 1 || p.Enabled == nil || n.SkipEmbedding == nil || !*n.SkipEmbedding {
 		return p, errCorrupt
 	}
 	for _, id := range []string{p.AuthConfigID, p.TenantUserID, p.ChannelID, p.BroadcasterUserID, p.BotUserID} {
@@ -209,6 +209,7 @@ func (g *graph) loadTwitchProfiles(ctx context.Context, owner int64, auth node) 
 		return nil, err
 	}
 	profiles := make([]twitchProfile, 0, len(rows))
+	enabled := 0
 	names := map[string]bool{}
 	broadcasters := map[string]twitchProfile{}
 	tuples := map[int64]twitchTuple{}
@@ -253,6 +254,12 @@ func (g *graph) loadTwitchProfiles(ctx context.Context, owner int64, auth node) 
 		}
 		tuples[p.id] = p.twitchTuple
 		profiles = append(profiles, p)
+		if *p.Enabled {
+			enabled++
+		}
+	}
+	if enabled > 1 {
+		return nil, errCorrupt
 	}
 	if err := g.validateConfigIncoming(ctx, auth, owner); err != nil {
 		return nil, err
