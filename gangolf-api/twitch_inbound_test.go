@@ -250,7 +250,7 @@ func TestTwitchInboundPublicationPartialFailureRecovery(t *testing.T) {
 }
 
 func TestTwitchInboundRejectsCorruptKeysAndSpoofedSourceWithoutWrites(t *testing.T) {
-	for _, kind := range []string{"duplicate", "public", "owner", "foreign-edge", "wrong-author", "nonempty", "missing-profile", "source-spoof", "schema-spoof", "patch-source", "disabled", "two-enabled"} {
+	for _, kind := range []string{"duplicate", "public", "owner", "foreign-edge", "wrong-author", "nonempty", "missing-profile", "source-spoof", "schema-spoof", "patch-source", "disabled"} {
 		t.Run(kind, func(t *testing.T) {
 			f, s, p, event := inboundFixture(t)
 			if kind == "source-spoof" || kind == "schema-spoof" {
@@ -293,9 +293,6 @@ func TestTwitchInboundRejectsCorruptKeysAndSpoofedSourceWithoutWrites(t *testing
 				delete(f.nodes, 30)
 			case "disabled":
 				changeProfile(f, 30, func(p *twitchProfile) { p.Enabled = new(false) })
-			case "two-enabled":
-				provisionTwitch(t, f, 40, "7", "102")
-				changeProfile(f, 40, func(p *twitchProfile) { p.Enabled = new(true) })
 			case "patch-source":
 				status(t, patchResource(t, s, strconv.FormatInt(id, 10), `[{"op":"replace","path":"/source","value":{}}]`), 400)
 				return
@@ -355,7 +352,7 @@ func TestTwitchInboundAlternateProfileRedeliveryRetainsOriginalSource(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	active, ok := eligibleTwitch(cfg, s.graph.config)
+	active, ok := eligibleTwitch(cfg, s.graph.config, 40)
 	if !ok || active.id != 40 {
 		t.Fatal("alternate did not activate")
 	}
@@ -477,7 +474,7 @@ func TestTwitchInboundSharedSourceAcrossRecipientsRemainsTenantIsolated(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	active, ok := eligibleTwitch(cfg, s.graph.config)
+	active, ok := eligibleTwitch(cfg, s.graph.config, 40)
 	if !ok || active.id != 40 {
 		t.Fatal("second recipient not eligible")
 	}

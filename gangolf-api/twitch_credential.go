@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -13,6 +14,11 @@ type twitchCredential struct {
 	AccessToken  string `json:"accessToken"`
 	RefreshToken string `json:"refreshToken"`
 	ClientSecret string `json:"clientSecret,omitempty"`
+}
+
+func (c twitchCredential) fingerprint() [32]byte {
+	data, _ := json.Marshal(c)
+	return sha256.Sum256(data)
 }
 
 func privateCredentialInfo(info os.FileInfo, directory bool) bool {

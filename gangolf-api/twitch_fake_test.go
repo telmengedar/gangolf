@@ -123,7 +123,7 @@ func (f *twitchFake) serve(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(400)
 			return
 		}
-		if sub.Type != "channel.chat.message" || sub.Version != "1" || sub.Condition.UserID != "900" || sub.Condition.BroadcasterUserID != "101" || sub.Transport.Method != "websocket" || sub.Transport.SessionID == "" || r.Header.Get("Client-Id") != "testclient" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+		if sub.Type != "channel.chat.message" || sub.Version != "1" || (f.subscribe == nil && (sub.Condition.UserID != "900" || sub.Condition.BroadcasterUserID != "101")) || sub.Transport.Method != "websocket" || sub.Transport.SessionID == "" || r.Header.Get("Client-Id") != "testclient" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
 			w.WriteHeader(400)
 			return
 		}
