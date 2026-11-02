@@ -52,12 +52,14 @@ func addTestKey(f *resourceFixture, s *server, name, user string, permissions ..
 }
 
 func TestTwitchConfigProfilesAndSemanticEdges(t *testing.T) {
-	for _, change := range []string{"valid", "wrong-root", "wrong-owner", "public", "wrong-type", "content-type", "schema", "missing-enabled", "tenant", "channel", "broadcaster", "bot", "client", "credential-path", "credential-url", "credential-secret", "name", "name-tenant", "embedding", "membership", "direction", "relation-type", "wrong-channel-target", "wrong-auth-target", "duplicate-relation", "extra-edge", "incoming-channel-forgery", "incoming-auth-forgery", "missing-configured-for"} {
+	for _, change := range []string{"valid", "enabled", "wrong-root", "wrong-owner", "public", "wrong-type", "content-type", "schema", "missing-enabled", "tenant", "channel", "broadcaster", "bot", "client", "credential-path", "credential-url", "credential-secret", "name", "name-tenant", "embedding", "membership", "direction", "relation-type", "wrong-channel-target", "wrong-auth-target", "duplicate-relation", "extra-edge", "incoming-channel-forgery", "incoming-auth-forgery", "missing-configured-for"} {
 		t.Run(change, func(t *testing.T) {
 			f, s := newResourceFixture(t)
 			provisionTwitch(t, f, 30, "7", "101")
 			n := f.nodes[30]
 			switch change {
+			case "enabled":
+				changeProfile(f, 30, func(p *twitchProfile) { p.Enabled = new(true) })
 			case "wrong-root":
 				n.Root = 99
 			case "wrong-owner":
@@ -116,7 +118,7 @@ func TestTwitchConfigProfilesAndSemanticEdges(t *testing.T) {
 				f.edges = append(f.edges[:2], f.edges[3:]...)
 			}
 			switch change {
-			case "schema", "missing-enabled", "tenant", "channel", "broadcaster", "bot", "client", "credential-path", "credential-url", "credential-secret":
+			case "schema", "enabled", "missing-enabled", "tenant", "channel", "broadcaster", "bot", "client", "credential-path", "credential-url", "credential-secret":
 			default:
 				f.nodes[30] = n
 			}
@@ -136,7 +138,7 @@ func TestTwitchConfigProfilesAndSemanticEdges(t *testing.T) {
 }
 
 func TestTwitchProfileDuplicatesAndImmutableTuple(t *testing.T) {
-	for _, change := range []string{"inactive-alternatives", "active-conflict", "tenant-conflict", "auth-conflict", "channel-conflict", "duplicate-name", "immutable-tenant", "immutable-channel", "immutable-broadcaster", "immutable-auth", "deleted", "credential-change"} {
+	for _, change := range []string{"inactive-alternatives", "active-conflict", "tenant-conflict", "auth-conflict", "channel-conflict", "duplicate-name", "immutable-tenant", "immutable-channel", "immutable-broadcaster", "immutable-auth", "deleted", "credential-change", "duplicate-canonical-channel", "duplicate-unselected-auth-name"} {
 		t.Run(change, func(t *testing.T) {
 			f, s := newResourceFixture(t)
 			provisionTwitch(t, f, 30, "7", "101")
@@ -169,6 +171,20 @@ func TestTwitchProfileDuplicatesAndImmutableTuple(t *testing.T) {
 				content := string(data)
 				f.nodes[19] = node{ID: 19, Name: "Gangolf API auth — alternate", Type: authConfigType, Root: 10, Owner: 20, Access: json.RawMessage("0"), SkipEmbedding: new(true), Content: &content, ContentType: "application/json"}
 				f.edges = append(f.edges, relation{Source: 19, Target: 15, Type: "None"})
+				f.edges[3].Target = 19
+				changeProfile(f, 30, func(p *twitchProfile) { p.AuthConfigID = "19" })
+			case "duplicate-canonical-channel":
+				n := f.nodes[31]
+				n.ID = 35
+				f.nodes[35] = n
+				f.edges = append(f.edges, relation{Source: 35, Target: 14, Type: "None"})
+			case "duplicate-unselected-auth-name":
+				data, _ := json.Marshal(f.legacy.cfg)
+				content := string(data)
+				for _, id := range []int64{19, 21} {
+					f.nodes[id] = node{ID: id, Name: "Gangolf API auth — alternate", Type: authConfigType, Root: 10, Owner: 20, Access: json.RawMessage("0"), SkipEmbedding: new(true), Content: &content, ContentType: "application/json"}
+					f.edges = append(f.edges, relation{Source: id, Target: 15, Type: "None"})
+				}
 				f.edges[3].Target = 19
 				changeProfile(f, 30, func(p *twitchProfile) { p.AuthConfigID = "19" })
 			case "deleted":

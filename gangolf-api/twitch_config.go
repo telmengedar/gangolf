@@ -47,7 +47,7 @@ func positiveDecimal(s string) bool {
 func decodeTwitchProfile(n node) (twitchProfile, error) {
 	var p twitchProfile
 	media, _, err := mime.ParseMediaType(n.ContentType)
-	if err != nil || media != "application/json" || n.Content == nil || strictJSON([]byte(*n.Content), &p) != nil || p.SchemaVersion != 1 || p.Enabled == nil || n.SkipEmbedding == nil || !*n.SkipEmbedding {
+	if err != nil || media != "application/json" || n.Content == nil || strictJSON([]byte(*n.Content), &p) != nil || p.SchemaVersion != 1 || p.Enabled == nil || *p.Enabled || n.SkipEmbedding == nil || !*n.SkipEmbedding {
 		return p, errCorrupt
 	}
 	for _, id := range []string{p.AuthConfigID, p.TenantUserID, p.ChannelID, p.BroadcasterUserID, p.BotUserID} {
@@ -124,18 +124,51 @@ func (g *graph) validateTwitchProfile(ctx context.Context, n node, owner int64) 
 			return p, errCorrupt
 		}
 		if ref.kind == "channel" {
+			media, _, err := mime.ParseMediaType(target.ContentType)
+			if err != nil || media != "application/json" {
+				return p, errCorrupt
+			}
 			if _, err := identityValue(target, "channel", "Twitch", p.BroadcasterUserID); err != nil {
 				return p, err
 			}
-		} else {
-			var cfg authConfig
-			media, _, err := mime.ParseMediaType(target.ContentType)
-			if !authProfileName(target.Name) || target.SkipEmbedding == nil || !*target.SkipEmbedding || err != nil || media != "application/json" || target.Content == nil || strictJSON([]byte(*target.Content), &cfg) != nil || !cfg.valid() {
+			channels, err := g.resourceNodes(ctx, "channel", target.Name, owner)
+			if err != nil {
+				return p, err
+			}
+			if len(channels) != 1 || channels[0].ID != target.ID {
 				return p, errCorrupt
 			}
+		} else if err := g.validateAuthProfileReference(ctx, target, owner); err != nil {
+			return p, err
 		}
 	}
 	return p, nil
+}
+
+func (g *graph) validateAuthProfileReference(ctx context.Context, n node, owner int64) error {
+	if n.Type != authConfigType || !g.privateNode(n, owner) || n.SkipEmbedding == nil || !*n.SkipEmbedding || !authProfileName(n.Name) {
+		return errCorrupt
+	}
+	canonical, err := g.queryResourceNodes(ctx, authConfigType, n.Name, owner, g.configurationGroup())
+	if err != nil {
+		return err
+	}
+	if len(canonical) != 1 || canonical[0].ID != n.ID || !sameIdentityProjection(n, canonical[0]) {
+		return errCorrupt
+	}
+	integrity, err := g.queryResourceNodes(ctx, authConfigType, n.Name, owner, 0)
+	if err != nil {
+		return err
+	}
+	if len(integrity) != 1 || integrity[0].ID != n.ID || !sameIdentityProjection(n, integrity[0]) {
+		return errCorrupt
+	}
+	media, _, err := mime.ParseMediaType(n.ContentType)
+	var cfg authConfig
+	if err != nil || media != "application/json" || n.Content == nil || strictJSON([]byte(*n.Content), &cfg) != nil || !cfg.valid() {
+		return errCorrupt
+	}
+	return nil
 }
 
 func (g *graph) groupsChannel() int64 { id, _ := g.groupID("channel"); return id }
