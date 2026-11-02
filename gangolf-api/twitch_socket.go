@@ -100,12 +100,16 @@ func (c *twitchClient) connection(ctx context.Context, profiles []twitchProfile,
 	go readTwitchFrames(child, socket, welcome, frames)
 	welcomeDeadline := welcomeAt.Add(time.Duration(welcome.Payload.Session.KeepaliveTimeoutSeconds) * time.Second)
 	subscriptionTimeout := min(10*time.Second, time.Until(welcomeDeadline))
-	if subscriptionTimeout <= 0 {
-		return errTwitchTransport
-	}
 	subscriptions := map[string]string{}
 	for _, profile := range profiles {
-		subscriptionCtx, finish := context.WithTimeout(ctx, subscriptionTimeout)
+		subscriptionDeadline := time.Now().Add(subscriptionTimeout)
+		if len(subscriptions) == 0 && welcomeDeadline.Before(subscriptionDeadline) {
+			subscriptionDeadline = welcomeDeadline
+		}
+		if !time.Now().Before(subscriptionDeadline) {
+			return errTwitchTransport
+		}
+		subscriptionCtx, finish := context.WithDeadline(ctx, subscriptionDeadline)
 		id, err := c.subscribe(subscriptionCtx, profile, welcome.Payload.Session.ID, &credential)
 		finish()
 		if err == errTwitchForbidden {
@@ -114,6 +118,9 @@ func (c *twitchClient) connection(ctx context.Context, profiles []twitchProfile,
 		}
 		if err != nil {
 			return err
+		}
+		if len(subscriptions) == 0 && !time.Now().Before(welcomeDeadline) {
+			return errTwitchTransport
 		}
 		subscriptions[profile.BroadcasterUserID] = id
 		update(profile, "connected", "", credential.fingerprint())

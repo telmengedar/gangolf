@@ -415,27 +415,68 @@ func TestReconcileTwitch_ExternalCredentialRotationDuringSubscription_RestartsOn
 	f, s, twitch, _, _ := multiTenantFixture(t)
 	original := twitch.twitch.subscribe
 	var rotated sync.Once
+	replacementPending := make(chan string, 1)
+	releaseReplacement := make(chan struct{})
+	var release sync.Once
+	unblock := func() { release.Do(func() { close(releaseReplacement) }) }
 	twitch.twitch.subscribe = func(r *http.Request, sub twitchSubscription) (int, any) {
 		if sub.Condition.BroadcasterUserID == "103" {
+			first := false
 			rotated.Do(func() {
+				first = true
 				if err := writeTwitchCredential(twitch.twitch.client.directory, "test-grant", twitchCredential{AccessToken: "operator-rotated-access", RefreshToken: "operator-rotated-refresh"}); err != nil {
 					t.Error(err)
 				}
 			})
+			if !first {
+				select {
+				case replacementPending <- sub.Transport.SessionID:
+				case <-r.Context().Done():
+					return 408, map[string]any{}
+				}
+				select {
+				case <-releaseReplacement:
+				case <-r.Context().Done():
+					return 408, map[string]any{}
+				}
+			}
 		}
 		return original(r, sub)
 	}
 	ticks, _ := startTwitchSupervisor(t, s)
+	t.Cleanup(unblock)
 	for _, id := range []int64{30, 40, 50} {
 		waitForTwitch(t, func() bool { state, _, _ := s.twitch.status(id); return state == "connected" })
 	}
 	previous := twitch.subscription(t, "101")
+	previousShared := twitch.subscription(t, "103")
+	if previousShared.Transport.SessionID != previous.Transport.SessionID {
+		t.Fatal("shared grant did not share original socket")
+	}
 	healthy := twitch.subscription(t, "102")
 	twitchTick(t, ticks)
 	waitForTwitch(t, func() bool {
 		twitch.mu.Lock()
 		defer twitch.mu.Unlock()
 		return twitch.subscriptions["101"].Transport.SessionID != previous.Transport.SessionID
+	})
+	var replacementSession string
+	select {
+	case replacementSession = <-replacementPending:
+	case <-time.After(3 * time.Second):
+		t.Fatal("replacement sibling subscription did not start")
+	}
+	if first := twitch.subscription(t, "101"); first.Transport.SessionID != replacementSession {
+		t.Fatal("first room did not move to replacement socket")
+	}
+	if sibling := twitch.subscription(t, "103"); sibling.Transport.SessionID != previousShared.Transport.SessionID {
+		t.Fatal("blocked sibling already moved to replacement socket")
+	}
+	unblock()
+	waitForTwitch(t, func() bool {
+		twitch.mu.Lock()
+		defer twitch.mu.Unlock()
+		return twitch.subscriptions["103"].Transport.SessionID == replacementSession && twitch.commands[replacementSession] != nil
 	})
 	twitch.publish(t, "103", "operator-rotation")
 	persistedTwitch(t, f, "103", "operator-rotation")

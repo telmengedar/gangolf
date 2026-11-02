@@ -551,6 +551,75 @@ func TestTwitchSubscribeHonorsWelcomeAdvertisedDeadline(t *testing.T) {
 	}
 }
 
+func TestConnection_SharedGrantFirstSubscription_UsesOriginalWelcomeDeadline(t *testing.T) {
+	for _, scenario := range []struct {
+		name           string
+		delay          time.Duration
+		firstForbidden bool
+		wantConnected  bool
+	}{
+		{"immediate-forbidden-then-success", 0, true, true},
+		{"delayed-forbidden-then-late-success", 650 * time.Millisecond, true, false},
+		{"early-success-then-late-sibling", 650 * time.Millisecond, false, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			_, _, first, _ := inboundFixture(t)
+			second := first
+			second.id++
+			second.BroadcasterUserID = "102"
+			f := newTwitchFake(t)
+			var attempts atomic.Int64
+			f.subscribe = func(r *http.Request, sub twitchSubscription) (int, any) {
+				attempts.Add(1)
+				time.Sleep(scenario.delay)
+				if sub.Condition.BroadcasterUserID == first.BroadcasterUserID && scenario.firstForbidden {
+					return http.StatusForbidden, map[string]any{}
+				}
+				sub.ID = "subscription-" + sub.Condition.BroadcasterUserID
+				sub.Status = "enabled"
+				return http.StatusAccepted, map[string]any{"data": []twitchSubscription{sub}}
+			}
+			f.socket = func(socket *websocket.Conn, _, _ string) {
+				ticker := time.NewTicker(100 * time.Millisecond)
+				defer ticker.Stop()
+				for range ticker.C {
+					if socket.WriteJSON(fakeEnvelope("session_keepalive")) != nil {
+						return
+					}
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			connected, forbidden := 0, 0
+			err := f.client.connection(ctx, []twitchProfile{first, second}, make(chan twitchEvent, 1), func(profile twitchProfile, state, code string, _ [32]byte) {
+				if profile.id == first.id && state == "auth-required" && code == "subscription_forbidden" {
+					forbidden++
+				}
+				if state == "connected" {
+					connected++
+					if profile.id == second.id {
+						cancel()
+					}
+				}
+			})
+			if attempts.Load() != 2 || (scenario.firstForbidden && forbidden != 1) {
+				t.Fatalf("attempts=%d forbidden=%d", attempts.Load(), forbidden)
+			}
+			if scenario.wantConnected {
+				want := 2
+				if scenario.firstForbidden {
+					want = 1
+				}
+				if connected != want || !errors.Is(err, context.Canceled) {
+					t.Fatalf("connected=%d want=%d err=%v", connected, want, err)
+				}
+			} else if connected != 0 || err != errTwitchTransport {
+				t.Fatalf("connected=%d want=0 err=%v", connected, err)
+			}
+		})
+	}
+}
+
 func TestTwitchPeerEOFBeforeWelcomeRetriesReceiver(t *testing.T) {
 	f, s, p, event := inboundFixture(t)
 	twitch := newTwitchFake(t)
