@@ -61,7 +61,9 @@ type storedMessage struct {
 	index   int
 }
 
-func (m message) valid() bool {
+func (m message) valid() bool { return m.validText(false) }
+
+func (m message) validText(allowWhitespace bool) bool {
 	for _, s := range []string{m.Service, m.Channel, m.User.Service, m.User.ServiceID, m.User.Name} {
 		if strings.TrimSpace(s) == "" {
 			return false
@@ -74,7 +76,7 @@ func (m message) valid() bool {
 		if c.Type != 0 && c.Type != 1 {
 			return false
 		}
-		if c.Type == 0 && strings.TrimSpace(c.Data) == "" || c.Type == 1 && strings.TrimSpace(c.Code) == "" {
+		if c.Type == 0 && (c.Data == "" || !allowWhitespace && strings.TrimSpace(c.Data) == "") || c.Type == 1 && strings.TrimSpace(c.Code) == "" {
 			return false
 		}
 		if c.Width != nil && *c.Width < 0 || c.Height != nil && *c.Height < 0 {

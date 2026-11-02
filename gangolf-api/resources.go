@@ -21,34 +21,36 @@ func (m messageInput) snapshot() message {
 }
 
 type messageResource struct {
-	ID        string    `json:"id"`
-	UserID    string    `json:"userId"`
-	ChannelID string    `json:"channelId"`
-	ReplyTo   *string   `json:"replyTo"`
-	Time      time.Time `json:"time"`
-	Service   string    `json:"service"`
-	Channel   string    `json:"channel"`
-	User      author    `json:"user"`
-	Chunks    []chunk   `json:"chunks"`
-	TTS       bool      `json:"tts"`
+	Source    *twitchSource `json:"source,omitempty"`
+	ID        string        `json:"id"`
+	UserID    string        `json:"userId"`
+	ChannelID string        `json:"channelId"`
+	ReplyTo   *string       `json:"replyTo"`
+	Time      time.Time     `json:"time"`
+	Service   string        `json:"service"`
+	Channel   string        `json:"channel"`
+	User      author        `json:"user"`
+	Chunks    []chunk       `json:"chunks"`
+	TTS       bool          `json:"tts"`
 }
 
 type messageContent struct {
-	SchemaVersion int       `json:"schemaVersion"`
-	Deleted       bool      `json:"deleted,omitempty"`
-	UserID        string    `json:"userId"`
-	ChannelID     string    `json:"channelId"`
-	ReplyTo       *string   `json:"replyTo"`
-	Time          time.Time `json:"time"`
-	Service       string    `json:"service,omitempty"`
-	Channel       string    `json:"channel,omitempty"`
-	User          *author   `json:"user,omitempty"`
-	Chunks        []chunk   `json:"chunks,omitempty"`
-	TTS           *bool     `json:"tts,omitempty"`
+	Source        *twitchSource `json:"source,omitempty"`
+	SchemaVersion int           `json:"schemaVersion"`
+	Deleted       bool          `json:"deleted,omitempty"`
+	UserID        string        `json:"userId"`
+	ChannelID     string        `json:"channelId"`
+	ReplyTo       *string       `json:"replyTo"`
+	Time          time.Time     `json:"time"`
+	Service       string        `json:"service,omitempty"`
+	Channel       string        `json:"channel,omitempty"`
+	User          *author       `json:"user,omitempty"`
+	Chunks        []chunk       `json:"chunks,omitempty"`
+	TTS           *bool         `json:"tts,omitempty"`
 }
 
 func (m messageContent) resource(id int64) messageResource {
-	return messageResource{ID: strconv.FormatInt(id, 10), UserID: m.UserID, ChannelID: m.ChannelID, ReplyTo: m.ReplyTo, Time: m.Time, Service: m.Service, Channel: m.Channel, User: *m.User, Chunks: m.Chunks, TTS: *m.TTS}
+	return messageResource{Source: m.Source, ID: strconv.FormatInt(id, 10), UserID: m.UserID, ChannelID: m.ChannelID, ReplyTo: m.ReplyTo, Time: m.Time, Service: m.Service, Channel: m.Channel, User: *m.User, Chunks: m.Chunks, TTS: *m.TTS}
 }
 
 func resourceID(id string) (int64, bool) {

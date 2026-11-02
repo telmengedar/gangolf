@@ -432,7 +432,7 @@ func decodeMessage(n node) (messageContent, error) {
 		return m, nil
 	}
 	data := []byte(*n.Content)
-	if !strings.HasPrefix(n.ContentType, "application/json") || strictJSON(data, &m) != nil || m.SchemaVersion != 1 || m.Time.IsZero() || m.Time.Location() != timeUTC {
+	if !strings.HasPrefix(n.ContentType, "application/json") || strictJSON(data, &m) != nil || (m.SchemaVersion != 1 && m.SchemaVersion != 2) || !validMessageName(n.Name, m) || m.Time.IsZero() || m.Time.Location() != timeUTC {
 		return m, errCorrupt
 	}
 	if _, ok := resourceID(m.UserID); !ok {
@@ -456,13 +456,18 @@ func decodeMessage(n node) (messageContent, error) {
 		if m.Service != "" || m.Channel != "" || m.User != nil || m.Chunks != nil || m.TTS != nil || !bytes.Equal(a, b) {
 			return m, errCorrupt
 		}
-	} else if m.User == nil || m.TTS == nil || !(message{Service: m.Service, Channel: m.Channel, User: *m.User, Chunks: m.Chunks, TTS: *m.TTS}).valid() {
+	} else if m.User == nil || m.TTS == nil || !(message{Service: m.Service, Channel: m.Channel, User: *m.User, Chunks: m.Chunks, TTS: *m.TTS}).validText(m.SchemaVersion == 2) {
 		return m, errCorrupt
 	}
 	return m, nil
 }
 
 func (g *graph) validateRelations(ctx context.Context, n node, m messageContent, owner int64) error {
+	if m.SchemaVersion == 2 {
+		if err := g.validateInboundSource(ctx, n, m, owner); err != nil {
+			return err
+		}
+	}
 	uid, _ := resourceID(m.UserID)
 	cid, _ := resourceID(m.ChannelID)
 	group, ok := g.groupID("message")
@@ -536,10 +541,10 @@ func (g *graph) messagesV3(ctx context.Context, owner int64) (map[int64]messageC
 	}
 	result := make(map[int64]messageContent)
 	for _, n := range nodes {
-		if n.Name != "message" {
+		if n.Name != "message" && !validInboundName(n.Name) {
 			return nil, errCorrupt
 		}
-		if n.Content == nil {
+		if n.Content == nil || *n.Content == "" && validInboundName(n.Name) {
 			continue
 		}
 		m, err := decodeMessage(n)
