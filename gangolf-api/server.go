@@ -60,6 +60,10 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		respond(w, 200, map[string]string{"status": "ready"})
 		return
 	}
+	if r.URL.Path == "/api/i1/twitch/channels" {
+		s.twitchChannels(ctx, w, r)
+		return
+	}
 	if r.URL.Path != "/api/v2/messages" {
 		if r.URL.Path == "/api/v3/messages" || strings.HasPrefix(r.URL.Path, "/api/v3/messages/") {
 			s.v3(ctx, w, r)
@@ -83,7 +87,8 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		storageFailure(w, err)
 		return
 	}
-	if status := s.authorize(ctx, r, cfg, token, queryKey); status != 0 {
+	p, status := s.authorize(ctx, r, cfg, token, queryKey)
+	if status != 0 {
 		switch status {
 		case 503:
 			failure(w, status, "auth_unavailable")
@@ -95,13 +100,13 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost {
-		s.post(ctx, w, r)
+		s.post(ctx, w, r, s.policy(p, cfg))
 		return
 	}
-	s.get(ctx, w, r)
+	s.get(ctx, w, r, s.policy(p, cfg))
 }
 
-func (s *server) post(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+func (s *server) post(ctx context.Context, w http.ResponseWriter, r *http.Request, policy messagePolicy) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
 		var tooLarge *http.MaxBytesError
@@ -120,6 +125,10 @@ func (s *server) post(ctx context.Context, w http.ResponseWriter, r *http.Reques
 	for _, m := range messages {
 		if nonNull(m.PostTo) {
 			failure(w, 422, "delivery_not_supported")
+			return
+		}
+		if strings.EqualFold(m.Service, "Twitch") && !policy.principal.admin() {
+			failure(w, 403, "forbidden")
 			return
 		}
 		if !m.valid() {
@@ -199,7 +208,7 @@ func parseFilter(q url.Values) (filter, error) {
 	return f, nil
 }
 
-func (s *server) get(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+func (s *server) get(ctx context.Context, w http.ResponseWriter, r *http.Request, policy messagePolicy) {
 	q, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil {
 		failure(w, 400, "invalid_filter")
@@ -217,6 +226,9 @@ func (s *server) get(ctx context.Context, w http.ResponseWriter, r *http.Request
 	}
 	matches := make([]storedMessage, 0)
 	for _, m := range all {
+		if !policy.visible(m.Service, m.Channel, "") {
+			continue
+		}
 		if !f.from.IsZero() && m.Time.Before(f.from) || !f.to.IsZero() && !m.Time.Before(f.to) || f.service != "" && m.Service != f.service || f.channel != "" && m.Channel != f.channel {
 			continue
 		}

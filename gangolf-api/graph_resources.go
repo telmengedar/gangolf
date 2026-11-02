@@ -79,6 +79,9 @@ func exactMembership(n node, group int64) bool {
 			continue
 		}
 		if e.Type == "Unidirectional" {
+			if n.Type == twitchConfigType && e.Source == n.ID && (e.Context == "configured-for" || e.Context == "uses-auth-config") || n.Type == authConfigType && e.Target == n.ID && e.Context == "uses-auth-config" || n.Type == "channel" && e.Target == n.ID && e.Context == "configured-for" {
+				continue
+			}
 			if n.Type == "user" && e.Target == n.ID && e.Context == "authored-by" || n.Type == "channel" && e.Target == n.ID && e.Context == "in-channel" {
 				continue
 			}
@@ -212,7 +215,7 @@ func (g *graph) queryResourceItem(ctx context.Context, kind, name string, owner,
 	var last int64
 	for {
 		q := url.Values{"rootNodeId": {strconv.FormatInt(g.root, 10)}, "type": {kind}, "fields": {"id,name,type,rootNodeId,ownerId,access,content,contentType,linkDetails"}, "sort": {"id"}, "descending": {"false"}, "count": {"500"}, "continue": {strconv.Itoa(offset)}}
-		if kind == authConfigType {
+		if kind == authConfigType || kind == twitchConfigType {
 			q.Set("fields", q.Get("fields")+",skipEmbedding")
 		}
 		if id > 0 {
@@ -414,6 +417,11 @@ func (g *graph) readEntity(ctx context.Context, id int64, kind string, owner int
 	n := page.Result[0]
 	if n.ID != id || n.Type != kind || !g.privateNode(n, owner) || !exactMembership(n, group) {
 		return node{}, errCorrupt
+	}
+	if kind == "channel" {
+		if err := g.validateConfigIncoming(ctx, n, owner); err != nil {
+			return node{}, err
+		}
 	}
 	return n, nil
 }

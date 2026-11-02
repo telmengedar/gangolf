@@ -25,6 +25,8 @@ type graph struct {
 	root, group, config int64
 	groupMu             sync.RWMutex
 	groups              map[string]int64
+	twitchMu            sync.Mutex
+	twitchTuples        map[int64]twitchTuple
 	http                *http.Client
 }
 
