@@ -13,7 +13,7 @@ import (
 )
 
 func TestTwitchReconcileDisableAndInvalidStorageStopPublicationAndRecover(t *testing.T) {
-	for _, kind := range []string{"disable", "tenant-disabled", "storage", "two-enabled"} {
+	for _, kind := range []string{"disable", "tenant-disabled", "storage"} {
 		t.Run(kind, func(t *testing.T) {
 			f, s, p, _ := inboundFixture(t)
 			twitch := newTwitchFake(t)
@@ -57,9 +57,6 @@ func TestTwitchReconcileDisableAndInvalidStorageStopPublicationAndRecover(t *tes
 				f.legacy.mu.Unlock()
 			case "storage":
 				f.fail = "list"
-			case "two-enabled":
-				provisionTwitch(t, f, 40, "7", "102")
-				changeProfile(f, 40, func(p *twitchProfile) { p.Enabled = new(true) })
 			}
 			f.mu.Unlock()
 			select {
@@ -68,7 +65,7 @@ func TestTwitchReconcileDisableAndInvalidStorageStopPublicationAndRecover(t *tes
 				t.Fatal("reconcile did not receive tick")
 			}
 			expected := "disabled"
-			if kind == "storage" || kind == "two-enabled" {
+			if kind == "storage" {
 				expected = "degraded"
 			}
 			waitForTwitch(t, func() bool { state, _, _ := s.twitch.status(p.id); return state == expected })

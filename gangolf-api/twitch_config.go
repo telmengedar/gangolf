@@ -209,7 +209,7 @@ func (g *graph) loadTwitchProfiles(ctx context.Context, owner int64, auth node) 
 		return nil, err
 	}
 	profiles := make([]twitchProfile, 0, len(rows))
-	enabled := 0
+	grants := map[string]string{}
 	names := map[string]bool{}
 	broadcasters := map[string]twitchProfile{}
 	tuples := map[int64]twitchTuple{}
@@ -255,11 +255,12 @@ func (g *graph) loadTwitchProfiles(ctx context.Context, owner int64, auth node) 
 		tuples[p.id] = p.twitchTuple
 		profiles = append(profiles, p)
 		if *p.Enabled {
-			enabled++
+			key := twitchGrantKey(p)
+			if ref, ok := grants[key]; ok && ref != p.CredentialRef {
+				return nil, errCorrupt
+			}
+			grants[key] = p.CredentialRef
 		}
-	}
-	if enabled > 1 {
-		return nil, errCorrupt
 	}
 	if err := g.validateConfigIncoming(ctx, auth, owner); err != nil {
 		return nil, err

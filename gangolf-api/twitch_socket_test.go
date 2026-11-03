@@ -34,7 +34,7 @@ func TestTwitchWebSocketReceiverPersistsRedeliveryAndStatus(t *testing.T) {
 	s.twitch = &twitchRuntime{client: twitch.client}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); s.receiveTwitch(ctx, p) }()
+	go func() { defer close(done); s.receiveTwitch(ctx, &twitchWorker{profiles: []twitchProfile{p}}) }()
 	defer func() { cancel(); <-done }()
 	waitForTwitch(t, func() bool {
 		f.mu.Lock()
@@ -145,7 +145,7 @@ func TestTwitchWebSocketProtocolRejectsMismatchedEventsAndRevocation(t *testing.
 			queue := make(chan twitchEvent, 256)
 			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 			defer cancel()
-			err := f.client.connection(ctx, p, queue, func() {})
+			err := f.client.connection(ctx, []twitchProfile{p}, queue, func(twitchProfile, string, string, [32]byte) {})
 			if err == nil || len(queue) != 0 || errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("err=%v queued=%d", err, len(queue))
 			}
@@ -201,7 +201,7 @@ func TestTwitchWebSocketKeepaliveExtendsLivenessButPingDoesNot(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 1800*time.Millisecond)
 			defer cancel()
 			start := time.Now()
-			err := f.client.connection(ctx, p, make(chan twitchEvent, 256), func() {})
+			err := f.client.connection(ctx, []twitchProfile{p}, make(chan twitchEvent, 256), func(twitchProfile, string, string, [32]byte) {})
 			elapsed := time.Since(start)
 			if kind == "keepalive" {
 				if !errors.Is(err, context.DeadlineExceeded) || elapsed < 1500*time.Millisecond {
@@ -267,7 +267,9 @@ func TestTwitchReconnectTransfersSubscriptionAndIgnoresReplayUntilWelcome(t *tes
 	defer cancel()
 	queue := make(chan twitchEvent, 256)
 	done := make(chan error, 1)
-	go func() { done <- f.client.connection(ctx, p, queue, func() {}) }()
+	go func() {
+		done <- f.client.connection(ctx, []twitchProfile{p}, queue, func(twitchProfile, string, string, [32]byte) {})
+	}()
 	select {
 	case <-oldEventSent:
 	case <-ctx.Done():
@@ -322,7 +324,7 @@ func TestTwitchWebSocketQueueOverflowIsBounded(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	queue := make(chan twitchEvent, 256)
-	err := f.client.connection(ctx, p, queue, func() {})
+	err := f.client.connection(ctx, []twitchProfile{p}, queue, func(twitchProfile, string, string, [32]byte) {})
 	if err != errTwitchOverflow || len(queue) != 256 {
 		t.Fatalf("err=%v pending=%d", err, len(queue))
 	}
@@ -351,7 +353,7 @@ func TestTwitchWebSocketUnexpectedLossResubscribes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	done := make(chan struct{})
-	go func() { defer close(done); s.receiveTwitch(ctx, p) }()
+	go func() { defer close(done); s.receiveTwitch(ctx, &twitchWorker{profiles: []twitchProfile{p}}) }()
 	waitForTwitch(t, func() bool {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -406,7 +408,7 @@ func TestTwitchWebSocketSlowGraphDoesNotBlockPingAndKeepalive(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	resourceLock.Lock()
-	go func() { defer close(done); s.receiveTwitch(ctx, p) }()
+	go func() { defer close(done); s.receiveTwitch(ctx, &twitchWorker{profiles: []twitchProfile{p}}) }()
 	select {
 	case <-pong:
 	case <-time.After(2 * time.Second):
@@ -481,7 +483,7 @@ func TestTwitchShutdownDrainsQueuedMessagesWithinBudget(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	resourceLock.Lock()
-	go func() { defer close(done); s.receiveTwitch(ctx, p) }()
+	go func() { defer close(done); s.receiveTwitch(ctx, &twitchWorker{profiles: []twitchProfile{p}}) }()
 	select {
 	case <-pong:
 	case <-time.After(3 * time.Second):
@@ -522,7 +524,7 @@ func TestTwitchRateLimitSurvivesSocketRetryWithoutEarlyNetwork(t *testing.T) {
 	twitch.client.rateMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer cancel()
-	err := twitch.client.connection(ctx, p, make(chan twitchEvent, 256), func() {})
+	err := twitch.client.connection(ctx, []twitchProfile{p}, make(chan twitchEvent, 256), func(twitchProfile, string, string, [32]byte) {})
 	if err != context.DeadlineExceeded {
 		t.Fatal(err)
 	}
@@ -543,9 +545,78 @@ func TestTwitchSubscribeHonorsWelcomeAdvertisedDeadline(t *testing.T) {
 	}
 	var connected atomic.Bool
 	started := time.Now()
-	err := f.client.connection(context.Background(), p, make(chan twitchEvent, 256), func() { connected.Store(true) })
+	err := f.client.connection(context.Background(), []twitchProfile{p}, make(chan twitchEvent, 256), func(_ twitchProfile, state, _ string, _ [32]byte) { connected.Store(state == "connected") })
 	if err == nil || connected.Load() {
 		t.Fatalf("err=%v connected=%v elapsed=%s", err, connected.Load(), time.Since(started))
+	}
+}
+
+func TestConnection_SharedGrantFirstSubscription_UsesOriginalWelcomeDeadline(t *testing.T) {
+	for _, scenario := range []struct {
+		name           string
+		delay          time.Duration
+		firstForbidden bool
+		wantConnected  bool
+	}{
+		{"immediate-forbidden-then-success", 0, true, true},
+		{"delayed-forbidden-then-late-success", 650 * time.Millisecond, true, false},
+		{"early-success-then-late-sibling", 650 * time.Millisecond, false, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			_, _, first, _ := inboundFixture(t)
+			second := first
+			second.id++
+			second.BroadcasterUserID = "102"
+			f := newTwitchFake(t)
+			var attempts atomic.Int64
+			f.subscribe = func(r *http.Request, sub twitchSubscription) (int, any) {
+				attempts.Add(1)
+				time.Sleep(scenario.delay)
+				if sub.Condition.BroadcasterUserID == first.BroadcasterUserID && scenario.firstForbidden {
+					return http.StatusForbidden, map[string]any{}
+				}
+				sub.ID = "subscription-" + sub.Condition.BroadcasterUserID
+				sub.Status = "enabled"
+				return http.StatusAccepted, map[string]any{"data": []twitchSubscription{sub}}
+			}
+			f.socket = func(socket *websocket.Conn, _, _ string) {
+				ticker := time.NewTicker(100 * time.Millisecond)
+				defer ticker.Stop()
+				for range ticker.C {
+					if socket.WriteJSON(fakeEnvelope("session_keepalive")) != nil {
+						return
+					}
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			connected, forbidden := 0, 0
+			err := f.client.connection(ctx, []twitchProfile{first, second}, make(chan twitchEvent, 1), func(profile twitchProfile, state, code string, _ [32]byte) {
+				if profile.id == first.id && state == "auth-required" && code == "subscription_forbidden" {
+					forbidden++
+				}
+				if state == "connected" {
+					connected++
+					if profile.id == second.id {
+						cancel()
+					}
+				}
+			})
+			if attempts.Load() != 2 || (scenario.firstForbidden && forbidden != 1) {
+				t.Fatalf("attempts=%d forbidden=%d", attempts.Load(), forbidden)
+			}
+			if scenario.wantConnected {
+				want := 2
+				if scenario.firstForbidden {
+					want = 1
+				}
+				if connected != want || !errors.Is(err, context.Canceled) {
+					t.Fatalf("connected=%d want=%d err=%v", connected, want, err)
+				}
+			} else if connected != 0 || err != errTwitchTransport {
+				t.Fatalf("connected=%d want=0 err=%v", connected, err)
+			}
+		})
 	}
 }
 
@@ -571,7 +642,7 @@ func TestTwitchPeerEOFBeforeWelcomeRetriesReceiver(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
 	done := make(chan struct{})
-	go func() { defer close(done); s.receiveTwitch(ctx, p) }()
+	go func() { defer close(done); s.receiveTwitch(ctx, &twitchWorker{profiles: []twitchProfile{p}}) }()
 	waitForTwitch(t, func() bool { state, _, _ := s.twitch.status(p.id); return state == "connected" && sockets.Load() >= 2 })
 	waitForTwitch(t, func() bool {
 		f.mu.Lock()

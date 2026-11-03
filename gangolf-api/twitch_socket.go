@@ -80,7 +80,8 @@ func readTwitchFrames(ctx context.Context, socket *websocket.Conn, welcome twitc
 	}
 }
 
-func (c *twitchClient) connection(ctx context.Context, p twitchProfile, queue chan<- twitchEvent, connected func()) error {
+func (c *twitchClient) connection(ctx context.Context, profiles []twitchProfile, queue chan<- twitchEvent, update func(twitchProfile, string, string, [32]byte)) error {
+	p := profiles[0]
 	if err := c.waitRateLimit(ctx); err != nil {
 		return err
 	}
@@ -99,16 +100,34 @@ func (c *twitchClient) connection(ctx context.Context, p twitchProfile, queue ch
 	go readTwitchFrames(child, socket, welcome, frames)
 	welcomeDeadline := welcomeAt.Add(time.Duration(welcome.Payload.Session.KeepaliveTimeoutSeconds) * time.Second)
 	subscriptionTimeout := min(10*time.Second, time.Until(welcomeDeadline))
-	if subscriptionTimeout <= 0 {
-		return errTwitchTransport
+	subscriptions := map[string]string{}
+	for _, profile := range profiles {
+		subscriptionDeadline := time.Now().Add(subscriptionTimeout)
+		if len(subscriptions) == 0 && welcomeDeadline.Before(subscriptionDeadline) {
+			subscriptionDeadline = welcomeDeadline
+		}
+		if !time.Now().Before(subscriptionDeadline) {
+			return errTwitchTransport
+		}
+		subscriptionCtx, finish := context.WithDeadline(ctx, subscriptionDeadline)
+		id, err := c.subscribe(subscriptionCtx, profile, welcome.Payload.Session.ID, &credential)
+		finish()
+		if err == errTwitchForbidden {
+			update(profile, "auth-required", "subscription_forbidden", credential.fingerprint())
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if len(subscriptions) == 0 && !time.Now().Before(welcomeDeadline) {
+			return errTwitchTransport
+		}
+		subscriptions[profile.BroadcasterUserID] = id
+		update(profile, "connected", "", credential.fingerprint())
 	}
-	subscriptionCtx, finish := context.WithTimeout(ctx, subscriptionTimeout)
-	subscriptionID, err := c.subscribe(subscriptionCtx, p, welcome.Payload.Session.ID, &credential)
-	finish()
-	if err != nil {
-		return err
+	if len(subscriptions) == 0 {
+		return errTwitchForbidden
 	}
-	connected()
 	validation := time.NewTicker(time.Hour)
 	defer validation.Stop()
 	replacement := make(chan twitchFrame, 1)
@@ -139,6 +158,11 @@ func (c *twitchClient) connection(ctx context.Context, p twitchProfile, queue ch
 			if err != nil {
 				return err
 			}
+			for _, profile := range profiles {
+				if _, ok := subscriptions[profile.BroadcasterUserID]; ok {
+					update(profile, "connected", "", credential.fingerprint())
+				}
+			}
 		case next := <-replacement:
 			transferring = false
 			if next.err != nil {
@@ -164,17 +188,26 @@ func (c *twitchClient) connection(ctx context.Context, p twitchProfile, queue ch
 			switch e.Metadata.MessageType {
 			case "session_keepalive":
 			case "notification":
-				if e.Metadata.SubscriptionType != "channel.chat.message" || e.Metadata.SubscriptionVersion != "1" || !e.Payload.Subscription.matches(p, frame.session, subscriptionID) {
+				var profile twitchProfile
+				for _, candidate := range profiles {
+					if candidate.BroadcasterUserID == e.Payload.Subscription.Condition.BroadcasterUserID {
+						profile = candidate
+						break
+					}
+				}
+				id, active := subscriptions[profile.BroadcasterUserID]
+				if !active || e.Metadata.SubscriptionType != "channel.chat.message" || e.Metadata.SubscriptionVersion != "1" || !e.Payload.Subscription.matches(profile, frame.session, id) {
 					return errTwitchProtocol
 				}
 				published, _ := time.Parse(time.RFC3339Nano, e.Metadata.MessageTimestamp)
-				event, err := parseTwitchEvent(e.Payload.Event, published, p)
+				event, err := parseTwitchEvent(e.Payload.Event, published, profile)
 				if err != nil {
 					return errTwitchProtocol
 				}
 				select {
 				case queue <- event:
 				default:
+					update(profile, "degraded", "inbound_queue_full", credential.fingerprint())
 					return errTwitchOverflow
 				}
 			case "session_reconnect":
@@ -202,13 +235,25 @@ func (c *twitchClient) connection(ctx context.Context, p twitchProfile, queue ch
 				}()
 			case "revocation":
 				sub := e.Payload.Subscription
-				if sub.ID != subscriptionID || sub.Type != "channel.chat.message" || sub.Version != "1" || sub.Condition.BroadcasterUserID != p.BroadcasterUserID || sub.Condition.UserID != p.BotUserID {
+				var profile twitchProfile
+				for _, candidate := range profiles {
+					if candidate.BroadcasterUserID == sub.Condition.BroadcasterUserID {
+						profile = candidate
+						break
+					}
+				}
+				id, active := subscriptions[profile.BroadcasterUserID]
+				if !active || sub.ID != id || sub.Type != "channel.chat.message" || sub.Version != "1" || sub.Condition.UserID != profile.BotUserID {
 					return errTwitchProtocol
 				}
 				if sub.Status == "version_removed" {
 					return errTwitchProtocol
 				}
-				return errTwitchForbidden
+				delete(subscriptions, profile.BroadcasterUserID)
+				update(profile, "auth-required", "subscription_forbidden", credential.fingerprint())
+				if len(subscriptions) == 0 {
+					return errTwitchForbidden
+				}
 			default:
 				return errTwitchProtocol
 			}

@@ -80,10 +80,10 @@ func (g *graph) inboundLookup(ctx context.Context, name string, owner int64) (no
 	return n, true, nil
 }
 
-func eligibleTwitch(cfg *authConfig, selected int64) (twitchProfile, bool) {
+func eligibleTwitch(cfg *authConfig, selected, id int64) (twitchProfile, bool) {
 	for _, p := range cfg.twitch {
 		grant, ok := cfg.Users[p.TenantUserID]
-		if *p.Enabled && p.AuthConfigID == strconv.FormatInt(selected, 10) && ok && grant.Enabled && hasHost(grant.Permissions) {
+		if p.id == id && *p.Enabled && p.AuthConfigID == strconv.FormatInt(selected, 10) && ok && grant.Enabled && hasHost(grant.Permissions) {
 			return p, true
 		}
 	}
@@ -103,7 +103,7 @@ func (s *server) ingestTwitch(ctx context.Context, p twitchProfile, e twitchEven
 	if err != nil {
 		return 0, err
 	}
-	current, ok := eligibleTwitch(cfg, s.graph.config)
+	current, ok := eligibleTwitch(cfg, s.graph.config, p.id)
 	if !ok || !sameReceiver(current, p) {
 		return 0, errUnavailable
 	}
