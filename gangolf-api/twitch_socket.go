@@ -16,7 +16,7 @@ func (c *twitchClient) reconnectAddress(raw string) bool {
 	if err != nil || originalErr != nil || address.User != nil || address.Fragment != "" {
 		return false
 	}
-	return address.Scheme == "wss" && address.Host == "eventsub.wss.twitch.tv" || original.Scheme == "ws" && address.Scheme == "ws" && address.Host == original.Host && (address.Hostname() == "127.0.0.1" || address.Hostname() == "localhost" || address.Hostname() == "::1")
+	return original.Scheme == "wss" && address.Scheme == "wss" && address.Host == "eventsub.wss.twitch.tv" || original.Scheme == "ws" && address.Scheme == "ws" && address.Host == original.Host && (address.Hostname() == "127.0.0.1" || address.Hostname() == "localhost" || address.Hostname() == "::1")
 }
 
 func (c *twitchClient) welcome(ctx context.Context, address string) (*websocket.Conn, twitchEnvelope, time.Time, error) {

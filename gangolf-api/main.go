@@ -48,10 +48,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	return serve(handler, addr)
+}
+
+func serve(handler *server, addr string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	check, cancel := context.WithTimeout(ctx, 30*time.Second)
-	_, err = handler.graph.loadConfig(check)
+	_, err := handler.graph.loadConfig(check)
 	cancel()
 	if err != nil {
 		return err
