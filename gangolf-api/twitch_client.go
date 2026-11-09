@@ -34,7 +34,7 @@ type twitchClient struct {
 }
 
 func productionTwitchClient(directory string) *twitchClient {
-	return &twitchClient{http: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, validateURL: "https://id.twitch.tv/oauth2/validate", tokenURL: "https://id.twitch.tv/oauth2/token", subscriptionURL: "https://api.twitch.tv/helix/eventsub/subscriptions", sendURL: "https://api.twitch.tv/helix/chat/messages", socketURL: "wss://eventsub.wss.twitch.tv/ws", directory: directory}
+	return &twitchClient{http: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, validateURL: twitchValidateAddress, tokenURL: twitchTokenAddress, subscriptionURL: twitchSubscriptionAddress, sendURL: twitchSendAddress, socketURL: twitchSocketAddress, directory: directory}
 }
 
 func (c *twitchClient) call(ctx context.Context, method, address, authorization, clientID, body, contentType string) ([]byte, int, http.Header, error) {
@@ -42,7 +42,7 @@ func (c *twitchClient) call(ctx context.Context, method, address, authorization,
 	if err != nil {
 		return nil, 0, nil, errTwitchTransport
 	}
-	if method == http.MethodPost && address == c.sendURL {
+	if method == http.MethodPost {
 		req.GetBody = nil
 	}
 	if authorization != "" {
@@ -137,6 +137,9 @@ func (c *twitchClient) authorize(ctx context.Context, p twitchProfile) (twitchCr
 }
 
 func (c *twitchClient) authorizeSend(ctx context.Context, p twitchProfile) (twitchCredential, error) {
+	if _, err := c.sendAddress(); err != nil {
+		return twitchCredential{}, err
+	}
 	return c.authorizeScopes(ctx, p, "user:read:chat", "user:write:chat")
 }
 

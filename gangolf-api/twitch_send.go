@@ -8,6 +8,10 @@ import (
 )
 
 func (c *twitchClient) sendMessage(ctx context.Context, p twitchProfile, credential twitchCredential, text string) (string, string, string, int) {
+	address, err := c.sendAddress()
+	if err != nil {
+		return "unknown", "", "", 0
+	}
 	unlock, err := lockTwitchGrant(ctx, p)
 	if err != nil {
 		return "unknown", "", "", 0
@@ -16,7 +20,7 @@ func (c *twitchClient) sendMessage(ctx context.Context, p twitchProfile, credent
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	body, _ := json.Marshal(map[string]string{"broadcaster_id": p.BroadcasterUserID, "sender_id": p.BotUserID, "message": text})
-	data, status, headers, err := c.call(ctx, http.MethodPost, c.sendURL, "Bearer "+credential.AccessToken, p.ClientID, string(body), "application/json")
+	data, status, headers, err := c.call(ctx, http.MethodPost, address, "Bearer "+credential.AccessToken, p.ClientID, string(body), "application/json")
 	if err != nil {
 		return "unknown", "", "", 0
 	}
