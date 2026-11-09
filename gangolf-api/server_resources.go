@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 var resourceLock sync.Mutex
@@ -70,7 +71,7 @@ func (s *server) v3(ctx context.Context, w http.ResponseWriter, r *http.Request)
 	}
 	policy := s.policy(p, cfg)
 	if r.Method == http.MethodPost {
-		s.createV3(ctx, w, r, cfg.serviceOwner, policy)
+		s.createV3(ctx, w, r, cfg, policy)
 		return
 	}
 	if !item {
@@ -120,6 +121,10 @@ func (s *server) v3(ctx context.Context, w http.ResponseWriter, r *http.Request)
 	case http.MethodGet:
 		respond(w, 200, m.resource(id))
 	case http.MethodPatch:
+		if m.SchemaVersion == 3 {
+			failure(w, 422, "immutable_delivery_message")
+			return
+		}
 		updated, ok := applyMessagePatch(m, operations)
 		if !ok {
 			failure(w, 400, "invalid_patch")
@@ -132,7 +137,7 @@ func (s *server) v3(ctx context.Context, w http.ResponseWriter, r *http.Request)
 		respond(w, 200, updated.resource(id))
 	case http.MethodDelete:
 		if !m.Deleted {
-			tombstone := messageContent{SchemaVersion: m.SchemaVersion, Source: m.Source.tombstone(), Deleted: true, Time: m.Time, UserID: m.UserID, ChannelID: m.ChannelID, ReplyTo: m.ReplyTo}
+			tombstone := messageContent{SchemaVersion: m.SchemaVersion, Delivery: m.Delivery, Source: m.Source.tombstone(), Deleted: true, Time: m.Time, UserID: m.UserID, ChannelID: m.ChannelID, ReplyTo: m.ReplyTo}
 			if err := s.graph.replaceContent(ctx, id, tombstone); err != nil {
 				storageFailure(w, errOutcomeUnknown)
 				return
@@ -157,7 +162,8 @@ func resourceBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	return data, true
 }
 
-func (s *server) createV3(ctx context.Context, w http.ResponseWriter, r *http.Request, owner int64, policy messagePolicy) {
+func (s *server) createV3(ctx context.Context, w http.ResponseWriter, r *http.Request, cfg *authConfig, policy messagePolicy) {
+	owner := cfg.serviceOwner
 	if r.URL.RawQuery != "" {
 		failure(w, 400, "invalid_filter")
 		return
@@ -173,6 +179,14 @@ func (s *server) createV3(ctx context.Context, w http.ResponseWriter, r *http.Re
 	}
 	if nonNull(input.PostTo) {
 		failure(w, 422, "delivery_not_supported")
+		return
+	}
+	if input.Service == "Twitch" && input.User == (author{Service: "Twitch", ServiceID: "GangolfBot", Name: "GangolfBot"}) {
+		if !utf8.Valid(data) {
+			failure(w, 422, "delivery_not_supported")
+			return
+		}
+		s.createTwitchOutbound(ctx, w, r, input, cfg, policy)
 		return
 	}
 	if !input.snapshot().valid() {

@@ -56,6 +56,12 @@ func safeMessageID(s string) bool {
 func validInboundName(name string) bool { _, _, ok := inboundKey(name); return ok }
 
 func validMessageName(name string, m messageContent) bool {
+	if m.SchemaVersion == 3 {
+		return validOutboundContent(name, m)
+	}
+	if m.Delivery != nil {
+		return false
+	}
 	if m.SchemaVersion == 1 {
 		return name == "message" && m.Source == nil
 	}
