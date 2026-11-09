@@ -26,6 +26,9 @@ func TestIdentityQueries_ConfirmationPreservesOriginalIDBeforePublication(t *tes
 						key = v.Channel
 					}
 					original := node{ID: originalID, Name: identityName(kind, v.Service, key), Type: kind, Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)}
+					if state == "create" {
+						original.SkipEmbedding = new(true)
+					}
 					canonical, publications, itemConfirmations := 0, 0, 0
 					var returned node
 					observeIdentityWire(s, func(r *http.Request) {

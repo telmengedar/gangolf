@@ -125,7 +125,7 @@ func (f *resourceFixture) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		id := f.next
 		f.next++
-		created := node{ID: id, Name: n.Name, Type: n.Type, Root: n.Root, Owner: 20, Access: json.RawMessage(`"None"`)}
+		created := node{ID: id, Name: n.Name, Type: n.Type, Root: n.Root, Owner: 20, Access: json.RawMessage(`"None"`), SkipEmbedding: new(true)}
 		f.nodes[id] = created
 		if f.inject(w, "created:"+n.Type) {
 			return
@@ -145,10 +145,13 @@ func (f *resourceFixture) serve(w http.ResponseWriter, r *http.Request) {
 				prefix := "gangolf-" + kind + ":"
 				if kind == "message" {
 					prefix = "gangolf-twitch-message:"
+					if strings.HasPrefix(q.Get("name"), "gangolf-twitch-outbound:") {
+						prefix = "gangolf-twitch-outbound:"
+					}
 				}
 				data, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(q.Get("name"), prefix))
 				var tuple []string
-				integrity = strings.HasPrefix(q.Get("name"), prefix) && err == nil && json.Unmarshal(data, &tuple) == nil && len(tuple) == 2
+				integrity = strings.HasPrefix(q.Get("name"), prefix) && err == nil && json.Unmarshal(data, &tuple) == nil && (len(tuple) == 2 && prefix != "gangolf-twitch-outbound:" || len(tuple) == 3 && prefix == "gangolf-twitch-outbound:")
 			}
 			if len(q["rootNodeId"]) != 1 || q.Get("rootNodeId") != "10" || len(q["type"]) != 1 || (!integrity && (len(q["linkedto"]) != 1 || q.Get("linkedto") != group)) {
 				w.WriteHeader(http.StatusBadRequest)
