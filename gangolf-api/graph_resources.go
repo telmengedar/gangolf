@@ -405,7 +405,10 @@ func (g *graph) readEntity(ctx context.Context, id int64, kind string, owner int
 	if !ok {
 		return node{}, errCorrupt
 	}
-	q := url.Values{"id": {strconv.FormatInt(id, 10)}, "rootNodeId": {strconv.FormatInt(g.root, 10)}, "linkedto": {strconv.FormatInt(group, 10)}, "type": {kind}, "fields": {"id,name,type,rootNodeId,ownerId,access,content,contentType,linkDetails,skipEmbedding"}, "count": {"2"}}
+	q := url.Values{"id": {strconv.FormatInt(id, 10)}, "rootNodeId": {strconv.FormatInt(g.root, 10)}, "linkedto": {strconv.FormatInt(group, 10)}, "type": {kind}, "fields": {"id,name,type,rootNodeId,ownerId,access,content,contentType,linkDetails"}, "count": {"2"}}
+	if kind == "message" {
+		q.Set("fields", q.Get("fields")+",skipEmbedding")
+	}
 	data, err := g.request(ctx, http.MethodGet, "/nodes", q, nil)
 	if err != nil {
 		return node{}, err
