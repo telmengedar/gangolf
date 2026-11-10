@@ -215,7 +215,7 @@ func (g *graph) queryResourceItem(ctx context.Context, kind, name string, owner,
 	var last int64
 	for {
 		q := url.Values{"rootNodeId": {strconv.FormatInt(g.root, 10)}, "type": {kind}, "fields": {"id,name,type,rootNodeId,ownerId,access,content,contentType,linkDetails"}, "sort": {"id"}, "descending": {"false"}, "count": {"500"}, "continue": {strconv.Itoa(offset)}}
-		if kind == authConfigType || kind == twitchConfigType {
+		if kind == authConfigType || kind == twitchConfigType || kind == "message" {
 			q.Set("fields", q.Get("fields")+",skipEmbedding")
 		}
 		if id > 0 {
@@ -273,7 +273,7 @@ func (g *graph) createResource(ctx context.Context, kind, name string, owner int
 		return node{}, errCorrupt
 	}
 	if err := g.addPlainLink(ctx, n.ID, group); err != nil {
-		return node{}, err
+		return n, err
 	}
 	return n, nil
 }
@@ -406,6 +406,9 @@ func (g *graph) readEntity(ctx context.Context, id int64, kind string, owner int
 		return node{}, errCorrupt
 	}
 	q := url.Values{"id": {strconv.FormatInt(id, 10)}, "rootNodeId": {strconv.FormatInt(g.root, 10)}, "linkedto": {strconv.FormatInt(group, 10)}, "type": {kind}, "fields": {"id,name,type,rootNodeId,ownerId,access,content,contentType,linkDetails"}, "count": {"2"}}
+	if kind == "message" {
+		q.Set("fields", q.Get("fields")+",skipEmbedding")
+	}
 	data, err := g.request(ctx, http.MethodGet, "/nodes", q, nil)
 	if err != nil {
 		return node{}, err
@@ -432,7 +435,7 @@ func decodeMessage(n node) (messageContent, error) {
 		return m, nil
 	}
 	data := []byte(*n.Content)
-	if !strings.HasPrefix(n.ContentType, "application/json") || strictJSON(data, &m) != nil || (m.SchemaVersion != 1 && m.SchemaVersion != 2) || !validMessageName(n.Name, m) || m.Time.IsZero() || m.Time.Location() != timeUTC {
+	if !strings.HasPrefix(n.ContentType, "application/json") || strictJSON(data, &m) != nil || (m.SchemaVersion != 1 && m.SchemaVersion != 2 && m.SchemaVersion != 3) || !validMessageName(n.Name, m) || m.Time.IsZero() || m.Time.Location() != timeUTC {
 		return m, errCorrupt
 	}
 	if _, ok := resourceID(m.UserID); !ok {
@@ -456,13 +459,18 @@ func decodeMessage(n node) (messageContent, error) {
 		if m.Service != "" || m.Channel != "" || m.User != nil || m.Chunks != nil || m.TTS != nil || !bytes.Equal(a, b) {
 			return m, errCorrupt
 		}
-	} else if m.User == nil || m.TTS == nil || !(message{Service: m.Service, Channel: m.Channel, User: *m.User, Chunks: m.Chunks, TTS: *m.TTS}).validText(m.SchemaVersion == 2) {
+	} else if m.SchemaVersion != 3 && (m.User == nil || m.TTS == nil || !(message{Service: m.Service, Channel: m.Channel, User: *m.User, Chunks: m.Chunks, TTS: *m.TTS}).validText(m.SchemaVersion == 2)) {
 		return m, errCorrupt
 	}
 	return m, nil
 }
 
 func (g *graph) validateRelations(ctx context.Context, n node, m messageContent, owner int64) error {
+	if m.SchemaVersion == 3 {
+		if err := g.validateOutbound(ctx, n, m, owner); err != nil {
+			return err
+		}
+	}
 	if m.SchemaVersion == 2 {
 		if err := g.validateInboundSource(ctx, n, m, owner); err != nil {
 			return err
@@ -541,7 +549,7 @@ func (g *graph) messagesV3(ctx context.Context, owner int64) (map[int64]messageC
 	}
 	result := make(map[int64]messageContent)
 	for _, n := range nodes {
-		if n.Name != "message" && !validInboundName(n.Name) {
+		if n.Name != "message" && !validInboundName(n.Name) && !validOutboundName(n.Name) {
 			return nil, errCorrupt
 		}
 		if n.Content == nil || *n.Content == "" && validInboundName(n.Name) {

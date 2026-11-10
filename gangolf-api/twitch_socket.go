@@ -151,10 +151,8 @@ func (c *twitchClient) connection(ctx context.Context, profiles []twitchProfile,
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-validation.C:
-			err := c.validate(ctx, p, credential)
-			if err == errTwitchAuth {
-				credential, err = c.refresh(ctx, p, credential)
-			}
+			updated, err := c.authorize(ctx, p)
+			credential = updated
 			if err != nil {
 				return err
 			}

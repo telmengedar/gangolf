@@ -28,18 +28,22 @@ type twitchClient struct {
 	validateURL     string
 	tokenURL        string
 	subscriptionURL string
+	sendURL         string
 	socketURL       string
 	directory       string
 }
 
 func productionTwitchClient(directory string) *twitchClient {
-	return &twitchClient{http: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, validateURL: "https://id.twitch.tv/oauth2/validate", tokenURL: "https://id.twitch.tv/oauth2/token", subscriptionURL: "https://api.twitch.tv/helix/eventsub/subscriptions", socketURL: "wss://eventsub.wss.twitch.tv/ws", directory: directory}
+	return &twitchClient{http: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, validateURL: twitchValidateAddress, tokenURL: twitchTokenAddress, subscriptionURL: twitchSubscriptionAddress, sendURL: twitchSendAddress, socketURL: twitchSocketAddress, directory: directory}
 }
 
 func (c *twitchClient) call(ctx context.Context, method, address, authorization, clientID, body, contentType string) ([]byte, int, http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, method, address, strings.NewReader(body))
 	if err != nil {
 		return nil, 0, nil, errTwitchTransport
+	}
+	if method == http.MethodPost {
+		req.GetBody = nil
 	}
 	if authorization != "" {
 		req.Header.Set("Authorization", authorization)
@@ -68,6 +72,10 @@ func (c *twitchClient) call(ctx context.Context, method, address, authorization,
 }
 
 func (c *twitchClient) validate(ctx context.Context, p twitchProfile, credential twitchCredential) error {
+	return c.validateScopes(ctx, p, credential, "user:read:chat")
+}
+
+func (c *twitchClient) validateScopes(ctx context.Context, p twitchProfile, credential twitchCredential, scopes ...string) error {
 	data, status, _, err := c.call(ctx, "GET", c.validateURL, "OAuth "+credential.AccessToken, "", "", "")
 	if err != nil {
 		return err
@@ -84,13 +92,18 @@ func (c *twitchClient) validate(ctx context.Context, p twitchProfile, credential
 		Scopes    []string `json:"scopes"`
 		ExpiresIn int      `json:"expires_in"`
 	}
-	if json.Unmarshal(data, &result) != nil || result.ClientID != p.ClientID || result.UserID != p.BotUserID || !slices.Contains(result.Scopes, "user:read:chat") || result.ExpiresIn <= 0 {
+	if json.Unmarshal(data, &result) != nil || result.ClientID != p.ClientID || result.UserID != p.BotUserID || result.ExpiresIn <= 0 {
 		return errTwitchForbidden
+	}
+	for _, scope := range scopes {
+		if !slices.Contains(result.Scopes, scope) {
+			return errTwitchForbidden
+		}
 	}
 	return nil
 }
 
-func (c *twitchClient) refresh(ctx context.Context, p twitchProfile, credential twitchCredential) (twitchCredential, error) {
+func (c *twitchClient) refreshToken(ctx context.Context, p twitchProfile, credential twitchCredential) (twitchCredential, error) {
 	form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {credential.RefreshToken}, "client_id": {p.ClientID}}
 	if credential.ClientSecret != "" {
 		form.Set("client_secret", credential.ClientSecret)
@@ -116,22 +129,61 @@ func (c *twitchClient) refresh(ctx context.Context, p twitchProfile, credential 
 	if err := writeTwitchCredential(c.directory, p.CredentialRef, credential); err != nil {
 		return twitchCredential{}, err
 	}
-	if err := c.validate(ctx, p, credential); err != nil {
-		return twitchCredential{}, err
-	}
 	return credential, nil
 }
 
 func (c *twitchClient) authorize(ctx context.Context, p twitchProfile) (twitchCredential, error) {
+	return c.authorizeScopes(ctx, p, "user:read:chat")
+}
+
+func (c *twitchClient) authorizeSend(ctx context.Context, p twitchProfile) (twitchCredential, error) {
+	if _, err := c.sendAddress(); err != nil {
+		return twitchCredential{}, err
+	}
+	return c.authorizeScopes(ctx, p, "user:read:chat", "user:write:chat")
+}
+
+func (c *twitchClient) authorizeScopes(ctx context.Context, p twitchProfile, scopes ...string) (twitchCredential, error) {
+	unlock, err := lockTwitchGrant(ctx, p)
+	if err != nil {
+		return twitchCredential{}, err
+	}
+	defer unlock()
 	credential, err := readTwitchCredential(c.directory, p.CredentialRef)
 	if err != nil {
 		return credential, err
 	}
-	err = c.validate(ctx, p, credential)
+	err = c.validateScopes(ctx, p, credential, scopes...)
 	if errors.Is(err, errTwitchAuth) {
-		return c.refresh(ctx, p, credential)
+		credential, err = c.refreshToken(ctx, p, credential)
+		if err == nil {
+			err = c.validateScopes(ctx, p, credential, scopes...)
+		}
 	}
 	return credential, err
+}
+
+func (c *twitchClient) refresh(ctx context.Context, p twitchProfile, previous twitchCredential) (twitchCredential, error) {
+	unlock, err := lockTwitchGrant(ctx, p)
+	if err != nil {
+		return twitchCredential{}, err
+	}
+	defer unlock()
+	current, err := readTwitchCredential(c.directory, p.CredentialRef)
+	if err != nil {
+		return twitchCredential{}, err
+	}
+	if current != previous {
+		err := c.validate(ctx, p, current)
+		if !errors.Is(err, errTwitchAuth) {
+			return current, err
+		}
+	}
+	current, err = c.refreshToken(ctx, p, current)
+	if err == nil {
+		err = c.validate(ctx, p, current)
+	}
+	return current, err
 }
 
 func retryDelay(headers http.Header, now time.Time) time.Duration {

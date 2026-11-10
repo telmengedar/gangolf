@@ -25,6 +25,8 @@ type twitchFake struct {
 	subscriptionCalls int
 	validationCalls   int
 	refreshCalls      int
+	sendCalls         int
+	send              func(http.ResponseWriter, *http.Request)
 	validate          func(*http.Request) (int, any)
 	refresh           func(*http.Request) (int, any)
 	subscribe         func(*http.Request, twitchSubscription) (int, any)
@@ -94,6 +96,15 @@ func fakeNotification(session string, event twitchEvent) twitchEnvelope {
 
 func (f *twitchFake) serve(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
+	case "/helix/chat/messages":
+		f.mu.Lock()
+		f.sendCalls++
+		f.mu.Unlock()
+		if f.send != nil {
+			f.send(w, r)
+			return
+		}
+		respond(w, 200, map[string]any{"data": []any{map[string]any{"message_id": "sent-1", "is_sent": true}}})
 	case "/validate":
 		f.mu.Lock()
 		f.validationCalls++
