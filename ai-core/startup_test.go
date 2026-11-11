@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -15,17 +16,18 @@ import (
 
 func TestSetAndDefaultedVariablesAreNamedInOrder(t *testing.T) {
 	cfg, err := loadConfig(env(map[string]string{
-		"GANGOLF_API_KEY":         "k.s",
-		"PROCESSOR_MEMORY_CONFIG": "88",
-		"GANGOLF_CHANNELS":        "twitch/stream",
-		"PROCESSOR_SUBJECT":       "42",
-		"PROCESSOR_CONFIG":        "7",
+		"GANGOLF_TWITCH_BOT_USER_ID": "99",
+		"GANGOLF_API_KEY":            "k.s",
+		"PROCESSOR_MEMORY_CONFIG":    "88",
+		"GANGOLF_CHANNELS":           "twitch/stream",
+		"PROCESSOR_SUBJECT":          "42",
+		"PROCESSOR_CONFIG":           "7",
 	}))
 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(cfg.set, ",") != "GANGOLF_API_KEY,GANGOLF_CHANNELS,PROCESSOR_SUBJECT,PROCESSOR_CONFIG,PROCESSOR_MEMORY_CONFIG" {
+	if strings.Join(cfg.set, ",") != "GANGOLF_API_KEY,GANGOLF_CHANNELS,GANGOLF_TWITCH_BOT_USER_ID,PROCESSOR_SUBJECT,PROCESSOR_CONFIG,PROCESSOR_MEMORY_CONFIG" {
 		t.Fatalf("set = %v", cfg.set)
 	}
 	if strings.Join(cfg.defaulted, ",") != "GANGOLF_API_URL,GANGOLF_BOT_NAME,PROCESSOR_URL,GANGOLF_ROUTES,GANGOLF_MIN_WORDS" {
@@ -35,14 +37,15 @@ func TestSetAndDefaultedVariablesAreNamedInOrder(t *testing.T) {
 
 func TestStartupLogNamesVariablesAndNeverPrintsValues(t *testing.T) {
 	cfg, err := loadConfig(env(map[string]string{
-		"GANGOLF_API_URL":         "https://user:hunter2@example.invalid/api",
-		"GANGOLF_API_KEY":         "keyid.topsecretvalue",
-		"PROCESSOR_MEMORY_CONFIG": "818181",
-		"GANGOLF_CHANNELS":        "twitch/privatechannel",
-		"GANGOLF_BOT_NAME":        "Distinctivebot",
-		"PROCESSOR_URL":           "http://internal-host.invalid:8080",
-		"PROCESSOR_SUBJECT":       "424242",
-		"PROCESSOR_CONFIG":        "737373",
+		"GANGOLF_API_URL":            "https://user:hunter2@example.invalid/api",
+		"GANGOLF_TWITCH_BOT_USER_ID": "99",
+		"GANGOLF_API_KEY":            "keyid.topsecretvalue",
+		"PROCESSOR_MEMORY_CONFIG":    "818181",
+		"GANGOLF_CHANNELS":           "twitch/privatechannel",
+		"GANGOLF_BOT_NAME":           "Distinctivebot",
+		"PROCESSOR_URL":              "http://internal-host.invalid:8080",
+		"PROCESSOR_SUBJECT":          "424242",
+		"PROCESSOR_CONFIG":           "737373",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -72,10 +75,11 @@ func TestStartupLogNamesVariablesAndNeverPrintsValues(t *testing.T) {
 
 func TestStartupLogCountsRoutedSourcesWithoutNamingThem(t *testing.T) {
 	cfg, err := loadConfig(env(map[string]string{
-		"GANGOLF_API_KEY":         "k.s",
-		"PROCESSOR_MEMORY_CONFIG": "88",
-		"GANGOLF_CHANNELS":        "twitch/privatechannel,localhost/hiddenhost,localhost/secondhidden",
-		"GANGOLF_ROUTES":          "localhost/hiddenhost=*,localhost/secondhidden=twitch/privatechannel",
+		"GANGOLF_TWITCH_BOT_USER_ID": "99",
+		"GANGOLF_API_KEY":            "k.s",
+		"PROCESSOR_MEMORY_CONFIG":    "88",
+		"GANGOLF_CHANNELS":           "twitch/privatechannel,localhost/hiddenhost,localhost/secondhidden",
+		"GANGOLF_ROUTES":             "localhost/hiddenhost=*,localhost/secondhidden=twitch/privatechannel",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -151,6 +155,7 @@ func TestEveryConfiguredValueReachesTheWire(t *testing.T) {
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		entry := api.record(r)
 		if entry.method == http.MethodPost {
+			writeSent(w, r, entry.body)
 			select {
 			case posted <- struct{}{}:
 			default:
@@ -169,14 +174,14 @@ func TestEveryConfiguredValueReachesTheWire(t *testing.T) {
 		short, long := stamp, longStamp
 		listMutex.Unlock()
 		if call == 1 {
-			io.WriteString(w, `{"result":[],"total":0}`)
+			io.WriteString(w, `{"result":[],"total":0,"continue":null}`)
 			return
 		}
-		rows := `{"service":"wiresource","channel":"wirehost","user":{"name":"viewer"},"time":"` + short + `","chunks":[{"type":0,"data":"anyone there"}]}`
+		rows := `{"id":"1","source":{"kind":"twitch"},"service":"Twitch","channel":"456","user":{"service":"Twitch","serviceId":"11","name":"viewer"},"time":"` + short + `","chunks":[{"type":0,"data":"anyone there"}]}`
 		if long != "" {
-			rows += `,{"service":"wiresource","channel":"wirehost","user":{"name":"viewer"},"time":"` + long + `","chunks":[{"type":0,"data":"is anyone out there at all"}]}`
+			rows += `,{"id":"2","source":{"kind":"twitch"},"service":"Twitch","channel":"456","user":{"service":"Twitch","serviceId":"11","name":"viewer"},"time":"` + long + `","chunks":[{"type":0,"data":"is anyone out there at all"}]}`
 		}
-		io.WriteString(w, `{"result":[`+rows+`],"total":1}`)
+		io.WriteString(w, `{"result":[`+rows+`],"total":`+fmt.Sprint(1+boolInt(long != ""))+`,"continue":null}`)
 	}))
 	defer apiServer.Close()
 	processorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -189,16 +194,17 @@ func TestEveryConfiguredValueReachesTheWire(t *testing.T) {
 	}))
 	defer processorServer.Close()
 	values := map[string]string{
-		"GANGOLF_API_URL":         apiServer.URL + apiSegment,
-		"GANGOLF_API_KEY":         apiKey,
-		"PROCESSOR_MEMORY_CONFIG": "88",
-		"GANGOLF_BOT_NAME":        botName,
-		"GANGOLF_CHANNELS":        "wireservice/wirechannel,wiresource/wirehost",
-		"GANGOLF_ROUTES":          "wiresource/wirehost=wireservice/wirechannel",
-		"GANGOLF_MIN_WORDS":       "wiresource/wirehost=3",
-		"PROCESSOR_URL":           processorServer.URL,
-		"PROCESSOR_SUBJECT":       "42",
-		"PROCESSOR_CONFIG":        "7",
+		"GANGOLF_API_URL":            apiServer.URL + apiSegment,
+		"GANGOLF_TWITCH_BOT_USER_ID": "99",
+		"GANGOLF_API_KEY":            apiKey,
+		"PROCESSOR_MEMORY_CONFIG":    "88",
+		"GANGOLF_BOT_NAME":           botName,
+		"GANGOLF_CHANNELS":           "Twitch/123,Twitch/456",
+		"GANGOLF_ROUTES":             "Twitch/456=Twitch/123",
+		"GANGOLF_MIN_WORDS":          "Twitch/456=3",
+		"PROCESSOR_URL":              processorServer.URL,
+		"PROCESSOR_SUBJECT":          "42",
+		"PROCESSOR_CONFIG":           "7",
 	}
 	logs := &lockedBuilder{}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -263,8 +269,8 @@ func TestEveryConfiguredValueReachesTheWire(t *testing.T) {
 	}
 	var posts []recordedRequest
 	for _, request := range api.all() {
-		if !strings.HasPrefix(request.path, apiSegment+"/v1/messages") {
-			t.Fatalf("message request path = %s, want prefix %s/v1/messages", request.path, apiSegment)
+		if !strings.HasPrefix(request.path, apiSegment+"/v3/messages") {
+			t.Fatalf("message request path = %s, want prefix %s/v3/messages", request.path, apiSegment)
 		}
 		if request.auth != "Bearer "+apiKey {
 			t.Fatalf("message request Authorization = %q, want the configured key", request.auth)
@@ -276,7 +282,7 @@ func TestEveryConfiguredValueReachesTheWire(t *testing.T) {
 	if len(posts) == 0 {
 		t.Fatal("no reply reached the message API")
 	}
-	var sent []struct {
+	var sent struct {
 		Service string `json:"service"`
 		Channel string `json:"channel"`
 		User    struct {
@@ -286,17 +292,17 @@ func TestEveryConfiguredValueReachesTheWire(t *testing.T) {
 			Data string `json:"data"`
 		} `json:"chunks"`
 	}
-	if err := json.Unmarshal(posts[0].body, &sent); err != nil || len(sent) != 1 || len(sent[0].Chunks) != 1 {
+	if err := json.Unmarshal(posts[0].body, &sent); err != nil || len(sent.Chunks) != 1 {
 		t.Fatalf("posted body = %s (%v)", posts[0].body, err)
 	}
-	if sent[0].User.Name != botName {
-		t.Fatalf("posted user name = %q, want %q", sent[0].User.Name, botName)
+	if sent.User.Name != "GangolfBot" {
+		t.Fatalf("posted user name = %q, want %q", sent.User.Name, botName)
 	}
-	if sent[0].Chunks[0].Data != "hello" {
-		t.Fatalf("posted text = %q, want %q: the configured bot name is not stripped as a label", sent[0].Chunks[0].Data, "hello")
+	if sent.Chunks[0].Data != "hello" {
+		t.Fatalf("posted text = %q, want %q: the configured bot name is not stripped as a label", sent.Chunks[0].Data, "hello")
 	}
-	if sent[0].Service != "wireservice" || sent[0].Channel != "wirechannel" {
-		t.Fatalf("posted to %s/%s, want wireservice/wirechannel", sent[0].Service, sent[0].Channel)
+	if sent.Service != "Twitch" || sent.Channel != "123" {
+		t.Fatalf("posted to %s/%s, want Twitch/123", sent.Service, sent.Channel)
 	}
 }
 
@@ -339,4 +345,23 @@ func (l *lockedBuilder) String() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.b.String()
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func writeSent(w http.ResponseWriter, r *http.Request, body []byte) {
+	var resource map[string]any
+	if err := json.Unmarshal(body, &resource); err != nil {
+		w.WriteHeader(400)
+		return
+	}
+	resource["id"] = "77"
+	resource["delivery"] = map[string]string{"state": "sent", "messageId": "twitch-77", "requestKey": r.Header.Get("Idempotency-Key")}
+	w.WriteHeader(201)
+	json.NewEncoder(w).Encode(resource)
 }

@@ -15,7 +15,8 @@ var (
 )
 
 func routesOf(channels, routes string) (config, error) {
-	values := map[string]string{"GANGOLF_API_KEY": "k.s", "PROCESSOR_MEMORY_CONFIG": "88", "GANGOLF_CHANNELS": channels}
+	values := map[string]string{"GANGOLF_TWITCH_BOT_USER_ID": "99",
+		"GANGOLF_API_KEY": "k.s", "PROCESSOR_MEMORY_CONFIG": "88", "GANGOLF_CHANNELS": channels}
 	if routes != "" {
 		values["GANGOLF_ROUTES"] = routes
 	}
@@ -63,7 +64,8 @@ func TestWithoutRoutesEveryChannelAnswersItself(t *testing.T) {
 }
 
 func TestBlankRoutesCountAsUnset(t *testing.T) {
-	cfg, err := loadConfig(env(map[string]string{"GANGOLF_API_KEY": "k.s", "PROCESSOR_MEMORY_CONFIG": "88", "GANGOLF_CHANNELS": "twitch/stream", "GANGOLF_ROUTES": "   "}))
+	cfg, err := loadConfig(env(map[string]string{"GANGOLF_TWITCH_BOT_USER_ID": "99",
+		"GANGOLF_API_KEY": "k.s", "PROCESSOR_MEMORY_CONFIG": "88", "GANGOLF_CHANNELS": "twitch/stream", "GANGOLF_ROUTES": "   "}))
 
 	if err != nil {
 		t.Fatal(err)
@@ -170,7 +172,8 @@ func TestStarNamesAChannelListedTwiceOnce(t *testing.T) {
 }
 
 func TestARouteErrorNamesTheEntryButNeverTheKey(t *testing.T) {
-	_, err := loadConfig(env(map[string]string{"GANGOLF_API_KEY": "keyid.topsecretvalue", "GANGOLF_CHANNELS": "twitch/stream", "GANGOLF_ROUTES": "localhost/host=twitch/stream"}))
+	_, err := loadConfig(env(map[string]string{"GANGOLF_TWITCH_BOT_USER_ID": "99",
+		"GANGOLF_API_KEY": "keyid.topsecretvalue", "GANGOLF_CHANNELS": "twitch/stream", "GANGOLF_ROUTES": "localhost/host=twitch/stream"}))
 
 	if err == nil || !strings.Contains(err.Error(), "localhost/host=twitch/stream") || strings.Contains(err.Error(), "topsecretvalue") {
 		t.Fatalf("err = %v, want the offending entry named and no secret", err)

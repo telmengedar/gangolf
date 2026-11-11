@@ -84,13 +84,13 @@ func (f *fakeMessages) Post(_ context.Context, key window.Key, text string) erro
 		return f.postErr
 	}
 	if f.echoPosts {
-		f.store = append(f.store, window.Line{Key: key, Speaker: "GangolfBot", Text: text, Time: *f.clock})
+		f.store = append(f.store, window.Line{Key: key, Own: true, Speaker: "GangolfBot", Text: text, Time: *f.clock})
 	}
 	return nil
 }
 
 func (f *fakeMessages) add(key window.Key, speaker, text string, at time.Time) {
-	f.store = append(f.store, window.Line{Key: key, Speaker: speaker, Text: text, Time: at})
+	f.store = append(f.store, window.Line{Key: key, Own: strings.EqualFold(speaker, "GangolfBot"), Speaker: speaker, Text: text, Time: at})
 }
 
 type fakeRunner struct {

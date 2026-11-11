@@ -24,6 +24,8 @@ type Key struct {
 
 // Line is one chat message as the window stores it.
 type Line struct {
+	ID  string
+	Own bool
 	Key
 	Speaker        string
 	Text           string
@@ -62,16 +64,14 @@ type entry struct {
 
 // Windows holds the per-channel line windows and the dedupe memory of one core.
 type Windows struct {
-	bot    string
 	seen   map[string]time.Time
 	lines  map[Key][]*entry
 	roster map[Key]map[string]bool
 }
 
-// New returns empty windows that treat speaker botName as Gangolf's own lines.
-func New(botName string) *Windows {
+// New returns empty conversation windows.
+func New(_ string) *Windows {
 	return &Windows{
-		bot:    botName,
 		seen:   make(map[string]time.Time),
 		lines:  make(map[Key][]*entry),
 		roster: make(map[Key]map[string]bool),
@@ -87,7 +87,7 @@ func (w *Windows) Ingest(lines []Line, now time.Time) int {
 			continue
 		}
 		w.seen[fp] = line.Time
-		bot := strings.EqualFold(line.Speaker, w.bot)
+		bot := line.Own
 		if !bot {
 			w.remember(line.Key, line.Speaker)
 		}
@@ -273,6 +273,9 @@ func speak(e *entry) string {
 }
 
 func fingerprint(line Line) string {
+	if line.ID != "" {
+		return fmt.Sprintf("%s\x00%s\x00%s", line.Service, line.Channel, line.ID)
+	}
 	return fmt.Sprintf("%s\x00%s\x00%s\x00%d\x00%s", line.Service, line.Channel, line.Speaker, line.Time.UnixNano(), line.Text)
 }
 

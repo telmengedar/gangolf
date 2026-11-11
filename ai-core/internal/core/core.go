@@ -245,14 +245,16 @@ func (c *Core) turn(ctx context.Context, key window.Key) bool {
 			return true
 		}
 	}
-	c.logTurn(key, batch, took, len(text), silent, outcome(result, silent))
 	if silent {
+		c.logTurn(key, batch, took, len(text), silent, outcome(result, silent))
 		return true
 	}
 	if err := c.messages.Post(ctx, key, text); err != nil {
+		c.logTurn(key, batch, took, len(text), false, "post-failed")
 		c.log.Error("post failed", "channel", key.Channel, "error", err.Error())
 		return true
 	}
+	c.logTurn(key, batch, took, len(text), false, outcome(result, false))
 	c.offerMemory(ctx, key, batch, text)
 	return true
 }

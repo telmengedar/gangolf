@@ -22,6 +22,7 @@ const (
 type config struct {
 	apiURL          string
 	apiKey          string
+	twitchBotUserID string
 	channels        []window.Key
 	routes          map[window.Key][]window.Key
 	minWords        map[window.Key]int
@@ -60,6 +61,10 @@ func loadConfig(lookup func(string) (string, bool)) (config, error) {
 		return config{}, err
 	}
 	cfg.channels = channels
+	cfg.twitchBotUserID = get("GANGOLF_TWITCH_BOT_USER_ID", "")
+	if !positiveDecimal(cfg.twitchBotUserID) {
+		return config{}, fmt.Errorf("GANGOLF_TWITCH_BOT_USER_ID must be a canonical positive decimal")
+	}
 	routes, err := parseRoutes(get(routesVariable, ""), channels)
 	if err != nil {
 		return config{}, err
@@ -278,4 +283,16 @@ func parseMinWords(raw string, channels []window.Key) (map[window.Key]int, error
 		minimums[source] = minimum
 	}
 	return minimums, nil
+}
+
+func positiveDecimal(value string) bool {
+	if value == "" || value[0] == '0' {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }

@@ -27,14 +27,14 @@ func TestPrivateMemoryWiringUsesDistinctConfigAfterPublicPostAndNeverPublishesIt
 			order = append(order, "public")
 			posts = append(posts, string(body))
 			mu.Unlock()
-			io.WriteString(w, `[]`)
+			writeSent(w, r, body)
 			return
 		}
 		mu.Lock()
 		lists++
 		if lists == 1 {
 			mu.Unlock()
-			io.WriteString(w, `{"result":[],"total":0}`)
+			io.WriteString(w, `{"result":[],"total":0,"continue":null}`)
 			return
 		}
 		if stamp == "" {
@@ -42,7 +42,7 @@ func TestPrivateMemoryWiringUsesDistinctConfigAfterPublicPostAndNeverPublishesIt
 		}
 		at := stamp
 		mu.Unlock()
-		io.WriteString(w, `{"result":[{"service":"twitch","channel":"stream","user":{"name":"Mara"},"time":"`+at+`","chunks":[{"type":0,"data":"hello from the stream"}]}],"total":1}`)
+		io.WriteString(w, `{"result":[{"id":"1","source":{"kind":"twitch"},"service":"Twitch","channel":"123","user":{"service":"Twitch","serviceId":"11","name":"Mara"},"time":"`+at+`","chunks":[{"type":0,"data":"hello from the stream"}]}],"total":1,"continue":null}`)
 	}))
 	defer api.Close()
 	processorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -71,7 +71,8 @@ func TestPrivateMemoryWiringUsesDistinctConfigAfterPublicPostAndNeverPublishesIt
 	logs := &lockedBuilder{}
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, env(map[string]string{"GANGOLF_API_KEY": "key.secret", "GANGOLF_CHANNELS": "twitch/stream", "GANGOLF_API_URL": api.URL, "PROCESSOR_URL": processorServer.URL, "PROCESSOR_CONFIG": "77", "PROCESSOR_SUBJECT": "42", "PROCESSOR_MEMORY_CONFIG": "88"}), slog.New(slog.NewTextHandler(logs, nil)))
+		done <- run(ctx, env(map[string]string{"GANGOLF_TWITCH_BOT_USER_ID": "99",
+			"GANGOLF_API_KEY": "key.secret", "GANGOLF_CHANNELS": "Twitch/123", "GANGOLF_API_URL": api.URL, "PROCESSOR_URL": processorServer.URL, "PROCESSOR_CONFIG": "77", "PROCESSOR_SUBJECT": "42", "PROCESSOR_MEMORY_CONFIG": "88"}), slog.New(slog.NewTextHandler(logs, nil)))
 	}()
 	var raw []byte
 	select {
@@ -131,11 +132,12 @@ func TestRunRejectsMissingMemoryPolicyBeforeStarting(t *testing.T) {
 		logs := &lockedBuilder{}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		err := run(ctx, env(map[string]string{
-			"GANGOLF_API_KEY":         "key.secret",
-			"GANGOLF_CHANNELS":        "twitch/stream",
-			"GANGOLF_API_URL":         ":invalid-message-url",
-			"PROCESSOR_URL":           ":invalid-processor-url",
-			"PROCESSOR_MEMORY_CONFIG": value,
+			"GANGOLF_TWITCH_BOT_USER_ID": "99",
+			"GANGOLF_API_KEY":            "key.secret",
+			"GANGOLF_CHANNELS":           "twitch/stream",
+			"GANGOLF_API_URL":            ":invalid-message-url",
+			"PROCESSOR_URL":              ":invalid-processor-url",
+			"PROCESSOR_MEMORY_CONFIG":    value,
 		}), slog.New(slog.NewTextHandler(logs, nil)))
 		cancel()
 		if err == nil || err.Error() != "PROCESSOR_MEMORY_CONFIG is required" {
