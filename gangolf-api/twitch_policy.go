@@ -104,7 +104,11 @@ func (s *server) twitchChannels(ctx context.Context, w http.ResponseWriter, r *h
 		if *profile.Enabled && s.twitch != nil {
 			state, code, dropped = s.twitch.status(profile.id)
 		}
-		result = append(result, map[string]any{"errorCode": code, "dropped": dropped, "configId": strconv.FormatInt(profile.id, 10), "name": profile.name, "channelId": profile.ChannelID, "broadcasterUserId": profile.BroadcasterUserID, "enabled": *profile.Enabled, "state": state})
+		entry := map[string]any{"errorCode": code, "dropped": dropped, "configId": strconv.FormatInt(profile.id, 10), "name": profile.name, "channelId": profile.ChannelID, "broadcasterUserId": profile.BroadcasterUserID, "enabled": *profile.Enabled, "state": state}
+		if profile.Transport != "" {
+			entry["transport"] = profile.Transport
+		}
+		result = append(result, entry)
 	}
 	respond(w, 200, map[string]any{"result": result})
 }

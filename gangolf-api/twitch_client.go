@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -30,11 +31,13 @@ type twitchClient struct {
 	subscriptionURL string
 	sendURL         string
 	socketURL       string
+	ircURL          string
+	ircTLS          *tls.Config
 	directory       string
 }
 
 func productionTwitchClient(directory string) *twitchClient {
-	return &twitchClient{http: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, validateURL: twitchValidateAddress, tokenURL: twitchTokenAddress, subscriptionURL: twitchSubscriptionAddress, sendURL: twitchSendAddress, socketURL: twitchSocketAddress, directory: directory}
+	return &twitchClient{http: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, validateURL: twitchValidateAddress, tokenURL: twitchTokenAddress, subscriptionURL: twitchSubscriptionAddress, sendURL: twitchSendAddress, socketURL: twitchSocketAddress, directory: directory, ircURL: "tls://irc.chat.twitch.tv:6697"}
 }
 
 func (c *twitchClient) call(ctx context.Context, method, address, authorization, clientID, body, contentType string) ([]byte, int, http.Header, error) {
@@ -76,6 +79,10 @@ func (c *twitchClient) validate(ctx context.Context, p twitchProfile, credential
 }
 
 func (c *twitchClient) validateScopes(ctx context.Context, p twitchProfile, credential twitchCredential, scopes ...string) error {
+	return c.validateCredential(ctx, p, &credential, scopes...)
+}
+
+func (c *twitchClient) validateCredential(ctx context.Context, p twitchProfile, credential *twitchCredential, scopes ...string) error {
 	data, status, _, err := c.call(ctx, "GET", c.validateURL, "OAuth "+credential.AccessToken, "", "", "")
 	if err != nil {
 		return err
@@ -87,12 +94,28 @@ func (c *twitchClient) validateScopes(ctx context.Context, p twitchProfile, cred
 		return errTwitchTransport
 	}
 	var result struct {
+		Login     string   `json:"login"`
 		ClientID  string   `json:"client_id"`
 		UserID    string   `json:"user_id"`
 		Scopes    []string `json:"scopes"`
 		ExpiresIn int      `json:"expires_in"`
 	}
-	if json.Unmarshal(data, &result) != nil || result.ClientID != p.ClientID || result.UserID != p.BotUserID || result.ExpiresIn <= 0 {
+	if json.Unmarshal(data, &result) != nil || result.ClientID != p.ClientID || result.UserID != p.BotUserID || p.Transport == "irc" && result.Login != credential.Login {
+		return errTwitchForbidden
+	}
+	if p.Transport == "irc" {
+		interval := time.Hour
+		if result.ExpiresIn > 0 {
+			interval = min(interval, time.Duration(min(result.ExpiresIn, 7200))*time.Second/2)
+		}
+		credential.revalidateAt = time.Now().Add(interval)
+		credential.diagnostic = ""
+		if result.ExpiresIn <= 0 || !slices.Contains(result.Scopes, "chat:read") || !slices.Contains(result.Scopes, "chat:edit") {
+			credential.diagnostic = "irc_metadata_unconfirmed"
+		}
+		return nil
+	}
+	if result.ExpiresIn <= 0 {
 		return errTwitchForbidden
 	}
 	for _, scope := range scopes {
@@ -133,10 +156,16 @@ func (c *twitchClient) refreshToken(ctx context.Context, p twitchProfile, creden
 }
 
 func (c *twitchClient) authorize(ctx context.Context, p twitchProfile) (twitchCredential, error) {
+	if p.Transport == "irc" {
+		return c.authorizeScopes(ctx, p, "chat:read")
+	}
 	return c.authorizeScopes(ctx, p, "user:read:chat")
 }
 
 func (c *twitchClient) authorizeSend(ctx context.Context, p twitchProfile) (twitchCredential, error) {
+	if p.Transport == "irc" {
+		return c.authorizeScopes(ctx, p, "chat:read", "chat:edit")
+	}
 	if _, err := c.sendAddress(); err != nil {
 		return twitchCredential{}, err
 	}
@@ -149,15 +178,15 @@ func (c *twitchClient) authorizeScopes(ctx context.Context, p twitchProfile, sco
 		return twitchCredential{}, err
 	}
 	defer unlock()
-	credential, err := readTwitchCredential(c.directory, p.CredentialRef)
+	credential, err := readProfileCredential(c.directory, p)
 	if err != nil {
 		return credential, err
 	}
-	err = c.validateScopes(ctx, p, credential, scopes...)
-	if errors.Is(err, errTwitchAuth) {
+	err = c.validateCredential(ctx, p, &credential, scopes...)
+	if errors.Is(err, errTwitchAuth) && p.Transport != "irc" {
 		credential, err = c.refreshToken(ctx, p, credential)
 		if err == nil {
-			err = c.validateScopes(ctx, p, credential, scopes...)
+			err = c.validateCredential(ctx, p, &credential, scopes...)
 		}
 	}
 	return credential, err
@@ -169,7 +198,7 @@ func (c *twitchClient) refresh(ctx context.Context, p twitchProfile, previous tw
 		return twitchCredential{}, err
 	}
 	defer unlock()
-	current, err := readTwitchCredential(c.directory, p.CredentialRef)
+	current, err := readProfileCredential(c.directory, p)
 	if err != nil {
 		return twitchCredential{}, err
 	}

@@ -91,7 +91,7 @@ func eligibleTwitch(cfg *authConfig, selected, id int64) (twitchProfile, bool) {
 }
 
 func sameReceiver(a, b twitchProfile) bool {
-	return a.id == b.id && a.twitchTuple == b.twitchTuple && a.BotUserID == b.BotUserID && a.ClientID == b.ClientID && a.CredentialRef == b.CredentialRef
+	return a.id == b.id && a.twitchTuple == b.twitchTuple && a.BotUserID == b.BotUserID && a.ClientID == b.ClientID && a.CredentialRef == b.CredentialRef && a.SchemaVersion == b.SchemaVersion && a.Transport == b.Transport && a.ChannelLogin == b.ChannelLogin
 }
 
 func (s *server) ingestTwitch(ctx context.Context, p twitchProfile, e twitchEvent) (int64, error) {
@@ -159,7 +159,7 @@ func (s *server) ingestTwitch(ctx context.Context, p twitchProfile, e twitchEven
 	if strconv.FormatInt(cid, 10) != p.ChannelID {
 		return 0, errCorrupt
 	}
-	source := &twitchSource{Kind: "twitch", ConfigID: strconv.FormatInt(p.id, 10), MessageID: e.MessageID, PublishedAt: &e.publishedAt, BroadcasterLogin: e.BroadcasterUserLogin, ChatterLogin: e.ChatterUserLogin, SourceBroadcasterUserID: e.SourceBroadcasterUserID, SourceMessageID: e.SourceMessageID}
+	source := &twitchSource{Kind: "twitch", Transport: p.Transport, ConfigID: strconv.FormatInt(p.id, 10), MessageID: e.MessageID, PublishedAt: &e.publishedAt, BroadcasterLogin: e.BroadcasterUserLogin, ChatterLogin: e.ChatterUserLogin, SourceBroadcasterUserID: e.SourceBroadcasterUserID, SourceMessageID: e.SourceMessageID}
 	if e.Reply != nil {
 		source.ParentMessageID = e.Reply.ParentMessageID
 	}

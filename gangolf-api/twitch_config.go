@@ -19,6 +19,8 @@ type twitchTuple struct {
 type twitchProfile struct {
 	twitchTuple
 	SchemaVersion int    `json:"schemaVersion"`
+	Transport     string `json:"transport,omitempty"`
+	ChannelLogin  string `json:"channelLogin,omitempty"`
 	BotUserID     string `json:"botUserId"`
 	ClientID      string `json:"clientId"`
 	CredentialRef string `json:"credentialRef"`
@@ -47,7 +49,7 @@ func positiveDecimal(s string) bool {
 func decodeTwitchProfile(n node) (twitchProfile, error) {
 	var p twitchProfile
 	media, _, err := mime.ParseMediaType(n.ContentType)
-	if err != nil || media != "application/json" || n.Content == nil || strictJSON([]byte(*n.Content), &p) != nil || p.SchemaVersion != 1 || p.Enabled == nil || n.SkipEmbedding == nil || !*n.SkipEmbedding {
+	if err != nil || media != "application/json" || n.Content == nil || strictJSON([]byte(*n.Content), &p) != nil || !validTwitchTransport(p) || p.Enabled == nil || n.SkipEmbedding == nil || !*n.SkipEmbedding {
 		return p, errCorrupt
 	}
 	for _, id := range []string{p.AuthConfigID, p.TenantUserID, p.ChannelID, p.BroadcasterUserID, p.BotUserID} {
@@ -255,7 +257,7 @@ func (g *graph) loadTwitchProfiles(ctx context.Context, owner int64, auth node) 
 		tuples[p.id] = p.twitchTuple
 		profiles = append(profiles, p)
 		if *p.Enabled {
-			key := twitchGrantKey(p)
+			key := twitchGrantKey(p) + ":" + p.Transport
 			if ref, ok := grants[key]; ok && ref != p.CredentialRef {
 				return nil, errCorrupt
 			}
@@ -274,4 +276,20 @@ func (g *graph) loadTwitchProfiles(ctx context.Context, owner int64, auth node) 
 	}
 	g.twitchTuples = tuples
 	return profiles, nil
+}
+
+func validTwitchLogin(login string) bool {
+	if len(login) == 0 || len(login) > 25 {
+		return false
+	}
+	for _, c := range login {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func validTwitchTransport(p twitchProfile) bool {
+	return p.SchemaVersion == 1 && p.Transport == "" && p.ChannelLogin == "" || p.SchemaVersion == 2 && p.Transport == "irc" && validTwitchLogin(p.ChannelLogin)
 }

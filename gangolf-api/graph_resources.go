@@ -435,8 +435,20 @@ func decodeMessage(n node) (messageContent, error) {
 		return m, nil
 	}
 	data := []byte(*n.Content)
-	if !strings.HasPrefix(n.ContentType, "application/json") || strictJSON(data, &m) != nil || (m.SchemaVersion != 1 && m.SchemaVersion != 2 && m.SchemaVersion != 3) || !validMessageName(n.Name, m) || m.Time.IsZero() || m.Time.Location() != timeUTC {
+	if !strings.HasPrefix(n.ContentType, "application/json") || strictJSON(data, &m) != nil || (m.SchemaVersion != 1 && m.SchemaVersion != 2 && m.SchemaVersion != 3 && m.SchemaVersion != 4) || !validMessageName(n.Name, m) || m.Time.IsZero() || m.Time.Location() != timeUTC {
 		return m, errCorrupt
+	}
+	if m.SchemaVersion == 4 {
+		var fields map[string]json.RawMessage
+		json.Unmarshal(data, &fields)
+		if _, exists := fields["source"]; exists {
+			return m, errCorrupt
+		}
+		var delivery map[string]json.RawMessage
+		json.Unmarshal(fields["delivery"], &delivery)
+		if _, exists := delivery["messageId"]; exists {
+			return m, errCorrupt
+		}
 	}
 	if _, ok := resourceID(m.UserID); !ok {
 		return m, errCorrupt
@@ -459,14 +471,14 @@ func decodeMessage(n node) (messageContent, error) {
 		if m.Service != "" || m.Channel != "" || m.User != nil || m.Chunks != nil || m.TTS != nil || !bytes.Equal(a, b) {
 			return m, errCorrupt
 		}
-	} else if m.SchemaVersion != 3 && (m.User == nil || m.TTS == nil || !(message{Service: m.Service, Channel: m.Channel, User: *m.User, Chunks: m.Chunks, TTS: *m.TTS}).validText(m.SchemaVersion == 2)) {
+	} else if m.SchemaVersion != 3 && m.SchemaVersion != 4 && (m.User == nil || m.TTS == nil || !(message{Service: m.Service, Channel: m.Channel, User: *m.User, Chunks: m.Chunks, TTS: *m.TTS}).validText(m.SchemaVersion == 2)) {
 		return m, errCorrupt
 	}
 	return m, nil
 }
 
 func (g *graph) validateRelations(ctx context.Context, n node, m messageContent, owner int64) error {
-	if m.SchemaVersion == 3 {
+	if m.SchemaVersion == 3 || m.SchemaVersion == 4 {
 		if err := g.validateOutbound(ctx, n, m, owner); err != nil {
 			return err
 		}
