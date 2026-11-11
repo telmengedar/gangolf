@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/telmengedar/gangolf/ai-core/internal/core"
+	"github.com/telmengedar/gangolf/ai-core/internal/messages"
 	"github.com/telmengedar/gangolf/ai-core/internal/processor"
 	"github.com/telmengedar/gangolf/ai-core/internal/window"
 )
@@ -117,6 +118,7 @@ func TestUndeliveredTurnsNeverQueueMemoryReview(t *testing.T) {
 		{name: "withheld", result: processor.Result{Silent: true, Failed: true, Reply: "fallback"}},
 		{name: "empty", result: processor.Result{Reply: " !! Gangolf: "}},
 		{name: "run failure", runErr: errors.New("failed")},
+		{name: "IRC submitted", result: processor.Result{Reply: "a reply"}, postErr: &messages.UnconfirmedSubmission{ID: "77", RequestKey: "safe-key"}},
 		{name: "post failure", result: processor.Result{Reply: "a reply"}, postErr: errors.New("failed")},
 		{name: "repeat withheld", result: processor.Result{Reply: "old answer"}, retry: true},
 		{name: "too short", input: "hi", minimum: 4, result: processor.Result{Reply: "a reply"}},
@@ -149,6 +151,9 @@ func TestUndeliveredTurnsNeverQueueMemoryReview(t *testing.T) {
 				}
 			}
 			finishes(t, "core did not stop", func() { c.Run(ctx) })
+			if tc.name == "IRC submitted" && (len(r.runner.calls) != 1 || len(r.messages.posts) != 1) {
+				t.Fatalf("submission scenario runs=%d posts=%d", len(r.runner.calls), len(r.messages.posts))
+			}
 			select {
 			case got := <-reviewer.calls:
 				t.Fatalf("undelivered turn reviewed=%+v", got)

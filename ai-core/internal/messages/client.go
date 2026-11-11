@@ -61,13 +61,15 @@ type wireMessage struct {
 }
 
 type wireSource struct {
-	Kind string `json:"kind"`
+	Kind      string  `json:"kind"`
+	Transport *string `json:"transport"`
 }
 
 type wireDelivery struct {
-	State      string `json:"state"`
-	MessageID  string `json:"messageId"`
-	RequestKey string `json:"requestKey"`
+	State      string          `json:"state"`
+	MessageID  json.RawMessage `json:"messageId"`
+	Transport  string          `json:"transport"`
+	RequestKey string          `json:"requestKey"`
 }
 
 type wireUser struct {
@@ -138,7 +140,7 @@ func (c *Client) List(ctx context.Context, from time.Time) ([]window.Line, error
 			if !resourceID(message.ID) {
 				return nil, errors.New("list messages: invalid resource ID")
 			}
-			if message.Service != "Twitch" || message.User.Service != "Twitch" || !decimal(message.User.ServiceID) || !decimal(message.Channel) || message.Source == nil || message.Source.Kind != "twitch" || message.Delivery != nil {
+			if message.Service != "Twitch" || message.User.Service != "Twitch" || !decimal(message.User.ServiceID) || !decimal(message.Channel) || message.Source == nil || message.Source.Kind != "twitch" || message.Source.Transport != nil && *message.Source.Transport != "irc" || message.Delivery != nil {
 				continue
 			}
 			stamp, ok := parseTime(message.Time)
@@ -192,7 +194,14 @@ func (c *Client) Post(ctx context.Context, key window.Key, text string) error {
 		return fmt.Errorf("post message requestKey=%s: %w", requestKey, err)
 	}
 	var result wireMessage
-	if json.Unmarshal(body, &result) != nil || !resourceID(result.ID) || result.Service != key.Service || result.Channel != key.Channel || result.User != marker || result.TTS == nil || *result.TTS || len(result.ReplyTo) != 0 && string(result.ReplyTo) != "null" || len(result.Chunks) != 1 || chunkKind(result.Chunks[0].Type) != kindText || result.Chunks[0].Data != text || result.Source != nil || result.Delivery == nil || result.Delivery.State != "sent" || result.Delivery.MessageID == "" || result.Delivery.RequestKey != requestKey {
+	if json.Unmarshal(body, &result) != nil || !resourceID(result.ID) || result.Service != key.Service || result.Channel != key.Channel || result.User != marker || result.TTS == nil || *result.TTS || len(result.ReplyTo) != 0 && string(result.ReplyTo) != "null" || len(result.Chunks) != 1 || chunkKind(result.Chunks[0].Type) != kindText || result.Chunks[0].Data != text || result.Source != nil || result.Delivery == nil || result.Delivery.RequestKey != requestKey {
+		return fmt.Errorf("post message requestKey=%s: delivery unconfirmed", requestKey)
+	}
+	if result.Delivery.Transport == "irc" && result.Delivery.State == "submitted" && len(result.Delivery.MessageID) == 0 {
+		return &UnconfirmedSubmission{ID: result.ID, RequestKey: requestKey}
+	}
+	var messageID string
+	if result.Delivery.Transport != "" || result.Delivery.State != "sent" || json.Unmarshal(result.Delivery.MessageID, &messageID) != nil || messageID == "" {
 		return fmt.Errorf("post message requestKey=%s: delivery unconfirmed", requestKey)
 	}
 	c.log.Info("message delivery confirmed", "id", result.ID, "requestKey", requestKey)

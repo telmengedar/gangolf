@@ -1,6 +1,7 @@
 package core_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,9 +22,10 @@ import (
 func v3Row(id, author, speaker, text string, stamp time.Time) map[string]any {
 	return map[string]any{"id": id, "service": "Twitch", "channel": "123", "user": map[string]string{"service": "Twitch", "serviceId": author, "name": speaker}, "time": stamp.Format(time.RFC3339Nano), "chunks": []map[string]any{{"type": 0, "data": text}}, "source": map[string]string{"kind": "twitch"}}
 }
-func TestV3SingleChannelCoreRoundTrip(t *testing.T)  { v3RoundTrip(t, false) }
-func TestV3RestartDoesNotReplayHistory(t *testing.T) { v3RoundTrip(t, true) }
-func v3RoundTrip(t *testing.T, restart bool) {
+func TestV3SingleChannelCoreRoundTrip(t *testing.T)          { v3RoundTrip(t, false, false) }
+func TestV3RestartDoesNotReplayHistory(t *testing.T)         { v3RoundTrip(t, true, false) }
+func TestV3IRCSubmissionIsNotConfirmedDelivery(t *testing.T) { v3RoundTrip(t, true, true) }
+func v3RoundTrip(t *testing.T, restart, irc bool) {
 	t.Helper()
 	clock := start
 	rows := []map[string]any{v3Row("1", "11", "viewer", "earlier context", clock.Add(-time.Minute)), v3Row("2", "99", "RenamedBot", "earlier reply", clock.Add(-time.Minute+time.Second))}
@@ -31,6 +33,9 @@ func v3RoundTrip(t *testing.T, restart bool) {
 		row := v3Row(fmt.Sprint(i+3), "99", "GangolfBot", "intent must be absent", clock)
 		delete(row, "source")
 		row["delivery"] = map[string]string{"state": state}
+		if irc {
+			row["delivery"] = map[string]string{"state": "submitted", "transport": "irc"}
+		}
 		rows = append(rows, row)
 	}
 	posts, runs := 0, 0
@@ -63,8 +68,12 @@ func v3RoundTrip(t *testing.T, restart bool) {
 			t.Errorf("sanitized=%q", text)
 		}
 		body["id"] = fmt.Sprint(100 + posts)
-		body["delivery"] = map[string]string{"state": "sent", "messageId": fmt.Sprintf("platform-%d", posts), "requestKey": r.Header.Get("Idempotency-Key")}
-		rows = append(rows, v3Row(fmt.Sprint(200+posts), "99", "ChangedDisplayName", text, clock))
+		if irc {
+			body["delivery"] = map[string]string{"state": "submitted", "transport": "irc", "requestKey": r.Header.Get("Idempotency-Key")}
+		} else {
+			body["delivery"] = map[string]string{"state": "sent", "messageId": fmt.Sprintf("platform-%d", posts), "requestKey": r.Header.Get("Idempotency-Key")}
+			rows = append(rows, v3Row(fmt.Sprint(200+posts), "99", "ChangedDisplayName", text, clock))
+		}
 		w.WriteHeader(201)
 		json.NewEncoder(w).Encode(body)
 	}))
@@ -92,7 +101,8 @@ func v3RoundTrip(t *testing.T, restart bool) {
 		fmt.Fprintf(w, `{"reply":"Gangolf: fresh reply %d","produced":true}`, runs)
 	}))
 	defer proc.Close()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	makeCore := func() *core.Core {
 		return core.New(core.Config{Routes: selfRoutes(window.Key{Service: "Twitch", Channel: "123"}), BotName: "GangolfBot"}, messages.New(api.URL+"/api", "sentinel-key", "99", api.Client(), logger), processor.New(proc.URL, 42, 77, proc.Client()), logger, func() time.Time { return clock })
 	}
@@ -102,6 +112,9 @@ func v3RoundTrip(t *testing.T, restart bool) {
 	}
 	clock = clock.Add(time.Second)
 	rows = append(rows, v3Row("10", "11", "GangolfBot", "hello gangolf", clock))
+	if irc {
+		rows[len(rows)-1]["source"].(map[string]string)["transport"] = "irc"
+	}
 	c.Tick(context.Background())
 	clock = clock.Add(core.Settle)
 	c.Tick(context.Background())
@@ -111,6 +124,9 @@ func v3RoundTrip(t *testing.T, restart bool) {
 	for range 3 {
 		clock = clock.Add(core.Settle)
 		c.Tick(context.Background())
+	}
+	if irc && (!strings.Contains(logs.String(), "submitted; visibility unconfirmed") || !strings.Contains(logs.String(), "outcome=submitted") || strings.Contains(logs.String(), "outcome=replied") || strings.Contains(logs.String(), "delivery confirmed") || strings.Contains(logs.String(), "post failed")) {
+		t.Fatalf("submission logs=%s", logs.String())
 	}
 	if runs != 1 || posts != 1 {
 		t.Fatalf("echo caused runs=%d posts=%d", runs, posts)
