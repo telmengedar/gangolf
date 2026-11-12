@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"reflect"
 	"strconv"
@@ -72,7 +73,10 @@ func (s *server) createTwitchOutbound(ctx context.Context, w http.ResponseWriter
 	resourceLock.Unlock()
 	botCredential, err := s.twitch.client.authorizeSend(ctx, p)
 	resourceLock.Lock()
-	if err != nil {
+	if p.Transport == "irc" && (errors.Is(err, errTwitchAuth) || errors.Is(err, errTwitchForbidden)) {
+		s.twitch.stopIRC(p)
+	}
+	if err != nil || p.Transport == "irc" && !s.twitch.ircReady(p, botCredential) {
 		failure(w, 503, "delivery_credentials_unavailable")
 		return
 	}
@@ -112,6 +116,10 @@ func (s *server) createTwitchOutbound(ctx context.Context, w http.ResponseWriter
 		return
 	}
 	m := messageContent{SchemaVersion: 3, Delivery: &twitchDelivery{RequestKey: keys[0], AuthUserID: caller.UserID, ConfigID: strconv.FormatInt(p.id, 10), State: "unknown"}, UserID: strconv.FormatInt(uid, 10), ChannelID: p.ChannelID, Time: s.now().UTC(), Service: input.Service, Channel: input.Channel, User: &input.User, Chunks: input.Chunks, TTS: &input.TTS}
+	if p.Transport == "irc" {
+		m.SchemaVersion = 4
+		m.Delivery.Transport = "irc"
+	}
 	id, err := s.graph.reserveOutbound(ctx, name, m, current.serviceOwner)
 	if err != nil {
 		deliveryFailure(w, 503, "delivery_outcome_unknown", id)
@@ -119,7 +127,13 @@ func (s *server) createTwitchOutbound(ctx context.Context, w http.ResponseWriter
 	}
 	w.Header().Set("Location", deliveryLocation(id))
 	resourceLock.Unlock()
-	state, messageID, resultCode, retry := s.twitch.client.sendMessage(ctx, p, botCredential, text)
+	var state, messageID, resultCode string
+	var retry int
+	if p.Transport == "irc" {
+		state, resultCode = s.twitch.sendIRC(ctx, p, botCredential, text)
+	} else {
+		state, messageID, resultCode, retry = s.twitch.client.sendMessage(ctx, p, botCredential, text)
+	}
 	resourceLock.Lock()
 	if state == "unknown" {
 		deliveryFailure(w, 503, "delivery_outcome_unknown", id)
@@ -130,7 +144,7 @@ func (s *server) createTwitchOutbound(ctx context.Context, w http.ResponseWriter
 		deliveryFailure(w, 503, "delivery_outcome_unknown", id)
 		return
 	}
-	stored.Delivery = &twitchDelivery{RequestKey: keys[0], AuthUserID: caller.UserID, ConfigID: strconv.FormatInt(p.id, 10), State: state, MessageID: messageID, Code: resultCode}
+	stored.Delivery = &twitchDelivery{Transport: m.Delivery.Transport, RequestKey: keys[0], AuthUserID: caller.UserID, ConfigID: strconv.FormatInt(p.id, 10), State: state, MessageID: messageID, Code: resultCode}
 	if err := s.graph.replaceContent(ctx, id, stored); err != nil {
 		deliveryFailure(w, 503, "delivery_outcome_unknown", id)
 		return

@@ -8,6 +8,7 @@ import (
 )
 
 type twitchSource struct {
+	Transport               string     `json:"transport,omitempty"`
 	Kind                    string     `json:"kind"`
 	ConfigID                string     `json:"configId"`
 	MessageID               string     `json:"messageId"`
@@ -56,7 +57,7 @@ func safeMessageID(s string) bool {
 func validInboundName(name string) bool { _, _, ok := inboundKey(name); return ok }
 
 func validMessageName(name string, m messageContent) bool {
-	if m.SchemaVersion == 3 {
+	if m.SchemaVersion == 3 || m.SchemaVersion == 4 {
 		return validOutboundContent(name, m)
 	}
 	if m.Delivery != nil {
@@ -67,11 +68,11 @@ func validMessageName(name string, m messageContent) bool {
 	}
 	broadcaster, id, ok := inboundKey(name)
 	s := m.Source
-	if !ok || s == nil || s.Kind != "twitch" || !positiveDecimal(s.ConfigID) || s.MessageID != id {
+	if !ok || s == nil || s.Kind != "twitch" || (s.Transport != "" && s.Transport != "irc") || !positiveDecimal(s.ConfigID) || s.MessageID != id {
 		return false
 	}
 	if m.Deleted {
-		return s.PublishedAt == nil && s.BroadcasterLogin == "" && s.ChatterLogin == "" && s.ParentMessageID == "" && s.SourceBroadcasterUserID == "" && s.SourceMessageID == ""
+		return s.Transport == "" && s.PublishedAt == nil && s.BroadcasterLogin == "" && s.ChatterLogin == "" && s.ParentMessageID == "" && s.SourceBroadcasterUserID == "" && s.SourceMessageID == ""
 	}
 	return m.Service == "Twitch" && m.Channel == broadcaster && m.User != nil && m.User.Service == "Twitch" && positiveDecimal(m.User.ServiceID) && s.PublishedAt != nil && !s.PublishedAt.IsZero() && s.PublishedAt.Location() == time.UTC && s.BroadcasterLogin != "" && s.ChatterLogin != "" && (s.ParentMessageID == "" || safeMessageID(s.ParentMessageID)) && ((s.SourceBroadcasterUserID == "" && s.SourceMessageID == "") || (positiveDecimal(s.SourceBroadcasterUserID) && safeMessageID(s.SourceMessageID)))
 }

@@ -7,17 +7,24 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"strings"
 	"syscall"
+	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 type twitchCredential struct {
+	revalidateAt time.Time
+	diagnostic   string
+	Login        string `json:"-"`
 	AccessToken  string `json:"accessToken"`
 	RefreshToken string `json:"refreshToken"`
 	ClientSecret string `json:"clientSecret,omitempty"`
 }
 
 func (c twitchCredential) fingerprint() [32]byte {
-	data, _ := json.Marshal(c)
+	data, _ := json.Marshal([]string{c.Login, c.AccessToken, c.RefreshToken, c.ClientSecret})
 	return sha256.Sum256(data)
 }
 
@@ -44,7 +51,57 @@ func credentialRoot(directory string) (*os.Root, error) {
 }
 
 func readTwitchCredential(directory, ref string) (twitchCredential, error) {
+	data, err := readProtectedCredential(directory, ref)
 	var c twitchCredential
+	if err != nil || strictJSON(data, &c) != nil || c.AccessToken == "" || c.RefreshToken == "" {
+		return twitchCredential{}, errTwitchCredential
+	}
+	return c, nil
+}
+
+func readProfileCredential(directory string, p twitchProfile) (twitchCredential, error) {
+	if p.Transport != "irc" {
+		return readTwitchCredential(directory, p.CredentialRef)
+	}
+	data, err := readProtectedCredential(directory, p.CredentialRef)
+	if err != nil {
+		return twitchCredential{}, err
+	}
+	return parseLegacyCredential(data)
+}
+
+func parseLegacyCredential(data []byte) (twitchCredential, error) {
+	var c twitchCredential
+	if !utf8.Valid(data) {
+		return c, errTwitchCredential
+	}
+	values := map[string]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if strings.ContainsFunc(line, unicode.IsControl) {
+			return c, errTwitchCredential
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+		if !ok || (key != "User" && key != "Token") || values[key] != "" || value == "" {
+			return c, errTwitchCredential
+		}
+		values[key] = value
+	}
+	c.Login = strings.ToLower(values["User"])
+	c.AccessToken = strings.TrimPrefix(values["Token"], "oauth:")
+	if !validTwitchLogin(c.Login) || c.AccessToken == "" || strings.ContainsFunc(c.AccessToken, unicode.IsSpace) {
+		return twitchCredential{}, errTwitchCredential
+	}
+	return c, nil
+}
+
+func readProtectedCredential(directory, ref string) ([]byte, error) {
+	var c []byte
 	if !safeSlug(ref) {
 		return c, errTwitchCredential
 	}
@@ -67,10 +124,10 @@ func readTwitchCredential(directory, ref string) (twitchCredential, error) {
 		return c, errTwitchCredential
 	}
 	data, err := io.ReadAll(io.LimitReader(file, 16385))
-	if err != nil || len(data) > 16384 || strictJSON(data, &c) != nil || c.AccessToken == "" || c.RefreshToken == "" {
-		return twitchCredential{}, errTwitchCredential
+	if err != nil || len(data) > 16384 {
+		return nil, errTwitchCredential
 	}
-	return c, nil
+	return data, nil
 }
 
 func writeTwitchCredential(directory, ref string, c twitchCredential) error {

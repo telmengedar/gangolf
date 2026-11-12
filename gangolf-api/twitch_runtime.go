@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/rand/v2"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -13,6 +14,7 @@ type twitchRuntime struct {
 	client   *twitchClient
 	mu       sync.Mutex
 	profiles map[int64]twitchReceiverStatus
+	irc      map[int64]*twitchIRCSession
 }
 
 func (r *twitchRuntime) status(id int64) (string, string, uint64) {
@@ -50,7 +52,7 @@ func (r *twitchRuntime) drop(id int64, count uint64) {
 func twitchGrantKey(p twitchProfile) string { return p.ClientID + ":" + p.BotUserID }
 
 func credentialFingerprint(client *twitchClient, p twitchProfile) [32]byte {
-	credential, err := readTwitchCredential(client.directory, p.CredentialRef)
+	credential, err := readProfileCredential(client.directory, p)
 	if err != nil {
 		return [32]byte{}
 	}
@@ -90,7 +92,7 @@ func (s *server) reconcileTwitch(ctx context.Context, ticks <-chan time.Time) {
 		if err == nil {
 			for _, p := range cfg.twitch {
 				if _, ok := eligibleTwitch(cfg, s.graph.config, p.id); ok {
-					key := twitchGrantKey(p)
+					key := twitchWorkerKey(p)
 					desired[key] = append(desired[key], p)
 				}
 			}
@@ -166,7 +168,7 @@ func (s *server) receiveTwitch(ctx context.Context, worker *twitchWorker) {
 	profiles := worker.profiles
 	runtime := s.twitch
 	base := runtime.client
-	client := &twitchClient{http: base.http, validateURL: base.validateURL, tokenURL: base.tokenURL, subscriptionURL: base.subscriptionURL, socketURL: base.socketURL, directory: base.directory}
+	client := &twitchClient{http: base.http, validateURL: base.validateURL, tokenURL: base.tokenURL, subscriptionURL: base.subscriptionURL, socketURL: base.socketURL, ircURL: base.ircURL, ircTLS: base.ircTLS, directory: base.directory}
 	active := profiles
 	blocked := map[int64]bool{}
 	set := func(state, code string) {
@@ -221,7 +223,13 @@ func (s *server) receiveTwitch(ctx context.Context, worker *twitchWorker) {
 		connectionCtx, cancel := context.WithCancel(ctx)
 		finished := make(chan error, 1)
 		go func() {
-			finished <- client.connection(connectionCtx, active, queue, func(p twitchProfile, state, code string, fingerprint [32]byte) {
+			connect := client.connection
+			if profiles[0].Transport == "irc" {
+				connect = func(ctx context.Context, ps []twitchProfile, q chan<- twitchEvent, update func(twitchProfile, string, string, [32]byte)) error {
+					return runtime.ircConnection(ctx, client, ps[0], q, update)
+				}
+			}
+			finished <- connect(connectionCtx, active, queue, func(p twitchProfile, state, code string, fingerprint [32]byte) {
 				if state == "connected" {
 					worker.rememberCredential(fingerprint)
 				}
@@ -272,4 +280,11 @@ func (s *server) receiveTwitch(ctx context.Context, worker *twitchWorker) {
 		}
 		delay = min(delay*2, 60*time.Second)
 	}
+}
+
+func twitchWorkerKey(p twitchProfile) string {
+	if p.Transport == "irc" {
+		return "irc:" + strconv.FormatInt(p.id, 10)
+	}
+	return twitchGrantKey(p)
 }

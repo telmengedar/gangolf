@@ -121,7 +121,7 @@ func (s *server) v3(ctx context.Context, w http.ResponseWriter, r *http.Request)
 	case http.MethodGet:
 		respond(w, 200, m.resource(id))
 	case http.MethodPatch:
-		if m.SchemaVersion == 3 {
+		if m.SchemaVersion == 3 || m.SchemaVersion == 4 {
 			failure(w, 422, "immutable_delivery_message")
 			return
 		}

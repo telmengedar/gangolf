@@ -8,6 +8,7 @@ import (
 )
 
 type twitchDelivery struct {
+	Transport  string `json:"transport,omitempty"`
 	RequestKey string `json:"requestKey"`
 	AuthUserID string `json:"authUserId"`
 	ConfigID   string `json:"configId"`
@@ -75,17 +76,28 @@ func validOutboundContent(name string, m messageContent) bool {
 	if !ok || m.Source != nil || d == nil || d.AuthUserID != userID || d.RequestKey != key || !positiveDecimal(d.ConfigID) || m.ReplyTo != nil {
 		return false
 	}
+	if m.SchemaVersion == 4 {
+		if d.Transport != "irc" || d.MessageID != "" {
+			return false
+		}
+	} else if m.SchemaVersion != 3 || d.Transport != "" {
+		return false
+	}
 	switch d.State {
 	case "unknown":
 		if d.MessageID != "" || d.Code != "" {
 			return false
 		}
+	case "submitted":
+		if m.SchemaVersion != 4 || d.Code != "" {
+			return false
+		}
 	case "sent":
-		if !safeMessageID(d.MessageID) || d.Code != "" {
+		if m.SchemaVersion != 3 || !safeMessageID(d.MessageID) || d.Code != "" {
 			return false
 		}
 	case "failed":
-		if d.MessageID != "" || !validDeliveryCode(d.Code) {
+		if d.MessageID != "" || !(m.SchemaVersion == 3 && validDeliveryCode(d.Code) || m.SchemaVersion == 4 && d.Code == "irc_not_written") {
 			return false
 		}
 	default:
