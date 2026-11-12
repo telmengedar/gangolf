@@ -55,17 +55,42 @@ func newIRCFake(t *testing.T, c *twitchClient, welcome string) *twitchIRCFake {
 			go func() {
 				defer socket.Close()
 				reader := bufio.NewReader(socket)
-				for _, expected := range []string{"PASS oauth:local-access\r\n", "NICK testbot\r\n", "CAP REQ :twitch.tv/commands twitch.tv/tags twitch.tv/membership\r\n", "JOIN #rugenforth\r\n"} {
+				capabilities, password, authenticated, joined, globalEligible := false, false, false, false, false
+				for range 4 {
 					line, err := reader.ReadString('\n')
 					if err != nil {
 						return
 					}
-					if line != expected {
-						t.Error("incorrect IRC authentication sequence")
+					switch line {
+					case "CAP REQ :twitch.tv/commands twitch.tv/tags twitch.tv/membership\r\n":
+						capabilities = true
+					case "PASS oauth:local-access\r\n":
+						password = true
+					case "NICK testbot\r\n":
+						authenticated, globalEligible = password, capabilities
+					case "JOIN #rugenforth\r\n":
+						joined = authenticated
+					default:
+						t.Error("incorrect IRC authentication command")
 						return
 					}
 				}
-				if _, err := socket.Write([]byte(welcome)); err != nil {
+				if !capabilities || !authenticated || !joined {
+					t.Error("incomplete IRC authentication sequence")
+					return
+				}
+				messages := strings.SplitAfter(welcome, "\r\n")
+				if !globalEligible {
+					kept := messages[:0]
+					for _, line := range messages {
+						frame, ok := parseIRCFrame(strings.TrimSuffix(line, "\r\n"))
+						if !ok || frame.command != "GLOBALUSERSTATE" {
+							kept = append(kept, line)
+						}
+					}
+					messages = kept
+				}
+				if _, err := socket.Write([]byte(strings.Join(messages, ""))); err != nil {
 					return
 				}
 				f.connected <- socket

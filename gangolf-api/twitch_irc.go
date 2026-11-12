@@ -60,7 +60,7 @@ func (r *twitchRuntime) ircConnection(ctx context.Context, c *twitchClient, p tw
 		}
 		r.mu.Unlock()
 	}()
-	if _, err := session.write(ctx, "PASS oauth:"+credential.AccessToken+"\r\nNICK "+credential.Login+"\r\nCAP REQ :twitch.tv/commands twitch.tv/tags twitch.tv/membership\r\nJOIN #"+p.ChannelLogin+"\r\n"); err != nil {
+	if _, err := session.write(ctx, "CAP REQ :twitch.tv/commands twitch.tv/tags twitch.tv/membership\r\nPASS oauth:"+credential.AccessToken+"\r\nNICK "+credential.Login+"\r\nJOIN #"+p.ChannelLogin+"\r\n"); err != nil {
 		return errTwitchTransport
 	}
 	deadline := time.Now().Add(15 * time.Second)
