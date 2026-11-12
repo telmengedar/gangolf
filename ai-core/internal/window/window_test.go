@@ -22,7 +22,7 @@ var (
 )
 
 func say(key window.Key, speaker, text string, at time.Time) window.Line {
-	return window.Line{Key: key, Speaker: speaker, Text: text, Time: at}
+	return window.Line{Key: key, Own: strings.EqualFold(speaker, "GangolfBot"), Speaker: speaker, Text: text, Time: at}
 }
 
 func TestDedupeAcrossOverlapIngestsTheSameRowOnce(t *testing.T) {

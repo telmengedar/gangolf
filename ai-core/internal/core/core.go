@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"unicode"
 
 	"github.com/telmengedar/gangolf/ai-core/internal/address"
+	"github.com/telmengedar/gangolf/ai-core/internal/messages"
 	"github.com/telmengedar/gangolf/ai-core/internal/processor"
 	"github.com/telmengedar/gangolf/ai-core/internal/window"
 )
@@ -245,14 +247,22 @@ func (c *Core) turn(ctx context.Context, key window.Key) bool {
 			return true
 		}
 	}
-	c.logTurn(key, batch, took, len(text), silent, outcome(result, silent))
 	if silent {
+		c.logTurn(key, batch, took, len(text), silent, outcome(result, silent))
 		return true
 	}
 	if err := c.messages.Post(ctx, key, text); err != nil {
+		var submission *messages.UnconfirmedSubmission
+		if errors.As(err, &submission) {
+			c.logTurn(key, batch, took, len(text), false, "submitted")
+			c.log.Info("submitted; visibility unconfirmed", "channel", key.Channel, "id", submission.ID, "requestKey", submission.RequestKey)
+			return true
+		}
+		c.logTurn(key, batch, took, len(text), false, "post-failed")
 		c.log.Error("post failed", "channel", key.Channel, "error", err.Error())
 		return true
 	}
+	c.logTurn(key, batch, took, len(text), false, outcome(result, false))
 	c.offerMemory(ctx, key, batch, text)
 	return true
 }

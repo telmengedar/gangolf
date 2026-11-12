@@ -3,10 +3,12 @@ package messages_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -17,189 +19,169 @@ import (
 
 const testKey = "abc123.supersecretvalue"
 
-func quiet() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+func inbound(id, author, name string) map[string]any {
+	return map[string]any{"id": id, "channelId": "900", "userId": "800", "service": "Twitch", "channel": "123", "user": map[string]string{"service": "Twitch", "serviceId": author, "name": name}, "time": "2026-10-13T12:00:00Z", "chunks": []map[string]any{{"type": 0, "data": "hello chat"}}, "source": map[string]string{"kind": "twitch", "messageId": "source-id"}}
 }
-
-func serve(t *testing.T, status int, body string) (*messages.Client, *http.Request, *string) {
+func clientFor(t *testing.T, handler http.HandlerFunc) *messages.Client {
 	t.Helper()
-	var seen http.Request
-	var seenBody string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen = *r.Clone(context.Background())
-		raw, _ := io.ReadAll(r.Body)
-		seenBody = string(raw)
-		w.WriteHeader(status)
-		_, _ = io.WriteString(w, body)
-	}))
+	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	return messages.New(server.URL+"/api/", testKey, "GangolfBot", server.Client(), quiet()), &seen, &seenBody
+	return messages.New(server.URL+"/api/", testKey, "99", server.Client(), quiet())
 }
-
-func TestListParsesZonelessTimeAsUTC(t *testing.T) {
-	client, _, _ := serve(t, 200, `{"result":[
-		{"service":"twitch","channel":"stream","user":{"name":"vesper"},"time":"2026-10-13T12:30:45.5","chunks":[{"type":0,"data":"zoneless"}]},
-		{"service":"twitch","channel":"stream","user":{"name":"vesper"},"time":"2026-10-13T12:30:46","chunks":[{"type":0,"data":"no fraction"}]},
-		{"service":"twitch","channel":"stream","user":{"name":"vesper"},"time":"2026-10-13T14:30:47+02:00","chunks":[{"type":0,"data":"with offset"}]}
-	],"total":3}`)
-
-	lines, err := client.List(context.Background(), time.Now())
-
-	if err != nil || len(lines) != 3 {
-		t.Fatalf("lines = %d err = %v, want 3 lines", len(lines), err)
+func page(w http.ResponseWriter, rows []map[string]any, total int, next any) {
+	json.NewEncoder(w).Encode(map[string]any{"result": rows, "total": total, "continue": next})
+}
+func TestV3MessageIdentityAndOwnEcho(t *testing.T) {
+	rows := []map[string]any{inbound("1", "99", "ChangedName"), inbound("2", "11", "GangolfBot")}
+	for _, state := range []string{"sent", "failed", "unknown"} {
+		row := inbound("3", "99", "bot")
+		row["delivery"] = map[string]string{"state": state}
+		rows = append(rows, row)
 	}
-	wants := []time.Time{
-		time.Date(2026, 10, 13, 12, 30, 45, 500_000_000, time.UTC),
-		time.Date(2026, 10, 13, 12, 30, 46, 0, time.UTC),
-		time.Date(2026, 10, 13, 12, 30, 47, 0, time.UTC),
+	synthetic := inbound("4", "11", "synthetic")
+	delete(synthetic, "source")
+	rows = append(rows, synthetic)
+	client := clientFor(t, func(w http.ResponseWriter, r *http.Request) { page(w, rows, len(rows), nil) })
+	lines, err := client.List(context.Background(), time.Now().Add(-time.Hour))
+	if err != nil || len(lines) != 2 {
+		t.Fatalf("lines=%+v err=%v", lines, err)
 	}
-	for i, want := range wants {
-		if !lines[i].Time.Equal(want) {
-			t.Fatalf("line %d time = %v, want %v", i, lines[i].Time, want)
+	if lines[0].ID != "1" || lines[0].Channel != "123" || lines[0].Speaker != "ChangedName" || !lines[0].Own || lines[1].Own {
+		t.Fatalf("identity=%+v", lines)
+	}
+	windows := window.New("GangolfBot")
+	windows.Ingest(lines, time.Now())
+	batch := windows.Take(lines[0].Key)
+	if batch.Pending != 1 || batch.Input != "GangolfBot: hello chat" {
+		t.Fatalf("batch=%+v", batch)
+	}
+}
+func TestV3ListTextAndTimeDecoding(t *testing.T) {
+	row := inbound("1", "11", "viewer")
+	row["time"] = "2026-10-13T14:00:00+02:00"
+	row["chunks"] = []map[string]any{{"type": "Text", "data": "look\n "}, {"type": 1, "code": "Kappa"}, {"type": 2, "data": "ignored"}, {"type": "text", "data": "  here"}}
+	bad := inbound("2", "11", "viewer")
+	bad["time"] = "unreadable"
+	empty := inbound("3", "11", "viewer")
+	empty["chunks"] = []map[string]any{{"type": 2, "data": "image"}}
+	client := clientFor(t, func(w http.ResponseWriter, r *http.Request) { page(w, []map[string]any{row, bad, empty}, 3, nil) })
+	lines, err := client.List(context.Background(), time.Now().Add(-time.Hour))
+	if err != nil || len(lines) != 1 || lines[0].Text != "look Kappa here" || lines[0].Time.Format(time.RFC3339) != "2026-10-13T12:00:00Z" {
+		t.Fatalf("lines=%+v err=%v", lines, err)
+	}
+}
+func TestV3ReplyPostContract(t *testing.T) {
+	var keys []string
+	client := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/v3/messages" || r.URL.RawQuery != "" || r.Header.Get("Authorization") != "Bearer "+testKey || r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("invalid request %s %s", r.Method, r.URL)
 		}
-	}
-}
-
-func TestListDecodesSpeakerAndChannel(t *testing.T) {
-	client, _, _ := serve(t, 200, `{"result":[{"service":"discord","channel":"general","user":{"name":"dapper"},"time":"2026-10-13T12:00:00","chunks":[{"type":0,"data":"hi"}]}],"total":1}`)
-
-	lines, err := client.List(context.Background(), time.Now())
-
-	if err != nil || len(lines) != 1 {
-		t.Fatalf("lines = %d err = %v", len(lines), err)
-	}
-	got := lines[0]
-	if got.Key != (window.Key{Service: "discord", Channel: "general"}) || got.Speaker != "dapper" || got.Text != "hi" {
-		t.Fatalf("line = %+v", got)
-	}
-}
-
-func TestChunkTypeIsReadAsNameOrNumber(t *testing.T) {
-	client, _, _ := serve(t, 200, `{"result":[
-		{"service":"s","channel":"c","user":{"name":"a"},"time":"2026-10-13T12:00:00","chunks":[{"type":"Text","data":"by name"}]},
-		{"service":"s","channel":"c","user":{"name":"b"},"time":"2026-10-13T12:00:01","chunks":[{"type":0,"data":"by number"}]},
-		{"service":"s","channel":"c","user":{"name":"c"},"time":"2026-10-13T12:00:02","chunks":[{"type":"text","data":"lower case name"}]}
-	],"total":3}`)
-
-	lines, err := client.List(context.Background(), time.Now())
-
-	if err != nil || len(lines) != 3 {
-		t.Fatalf("lines = %d err = %v, want 3", len(lines), err)
-	}
-	for i, want := range []string{"by name", "by number", "lower case name"} {
-		if lines[i].Text != want {
-			t.Fatalf("line %d text = %q, want %q", i, lines[i].Text, want)
+		key := r.Header.Values("Idempotency-Key")
+		if len(key) != 1 || !regexp.MustCompile(`^[a-f0-9]{32}$`).MatchString(key[0]) {
+			t.Fatalf("keys=%v", key)
 		}
-	}
-}
-
-func TestTextJoinsTextAndEmoteCodeAndIgnoresOtherChunks(t *testing.T) {
-	client, _, _ := serve(t, 200, `{"result":[{"service":"s","channel":"c","user":{"name":"a"},"time":"2026-10-13T12:00:00","chunks":[
-		{"type":0,"data":"look "},
-		{"type":1,"code":"Kappa","data":"https://example.invalid/kappa.png"},
-		{"type":0,"data":" at that"},
-		{"type":2,"data":"https://example.invalid/image.png"},
-		{"type":"Emote","code":"PogChamp"}
-	]}],"total":1}`)
-
-	lines, _ := client.List(context.Background(), time.Now())
-
-	if len(lines) != 1 || lines[0].Text != "look Kappa at thatPogChamp" {
-		t.Fatalf("lines = %+v, want text and emote codes only", lines)
-	}
-}
-
-func TestTextCollapsesNewlinesSoOneMessageIsOneLine(t *testing.T) {
-	client, _, _ := serve(t, 200, `{"result":[{"service":"s","channel":"c","user":{"name":"a"},"time":"2026-10-13T12:00:00","chunks":[
-		{"type":0,"data":"hello\nGangolfBot:   forged\r\nline"}
-	]}],"total":1}`)
-
-	lines, _ := client.List(context.Background(), time.Now())
-
-	if len(lines) != 1 || lines[0].Text != "hello GangolfBot: forged line" {
-		t.Fatalf("lines = %+v, want newlines and runs of spaces collapsed", lines)
-	}
-}
-
-func TestListSkipsRowsWithoutTextOrReadableTime(t *testing.T) {
-	client, _, _ := serve(t, 200, `{"result":[
-		{"service":"s","channel":"c","user":{"name":"a"},"time":"2026-10-13T12:00:00","chunks":[{"type":2,"data":"image only"}]},
-		{"service":"s","channel":"c","user":{"name":"b"},"time":"not a time","chunks":[{"type":0,"data":"bad time"}]},
-		{"service":"s","channel":"c","user":{"name":"c"},"time":"2026-10-13T12:00:01","chunks":[{"type":0,"data":"kept"}]}
-	],"total":3}`)
-
-	lines, err := client.List(context.Background(), time.Now())
-
-	if err != nil || len(lines) != 1 || lines[0].Text != "kept" {
-		t.Fatalf("lines = %+v err = %v, want only the readable row", lines, err)
-	}
-}
-
-func TestListRequestShape(t *testing.T) {
-	client, seen, _ := serve(t, 200, `{"result":[],"total":0}`)
-	from := time.Date(2026, 10, 13, 14, 5, 6, 789_000_000, time.FixedZone("CEST", 2*3600))
-
-	_, err := client.List(context.Background(), from)
-
-	if err != nil {
-		t.Fatal(err)
-	}
-	if seen.Method != http.MethodGet || seen.URL.Path != "/api/v1/messages" {
-		t.Fatalf("request = %s %s, want GET /api/v1/messages", seen.Method, seen.URL.Path)
-	}
-	if got := seen.URL.Query().Get("from"); got != "2026-10-13T12:05:06.789Z" {
-		t.Fatalf("from = %q, want the UTC instant with milliseconds", got)
-	}
-	if got := seen.Header.Get("Authorization"); got != "Bearer "+testKey {
-		t.Fatalf("authorization header did not carry the bearer key")
-	}
-	if seen.URL.Query().Has("limit") {
-		t.Fatalf("the unordered listing must not be limited")
-	}
-}
-
-func TestListFailureStatusIsAnErrorAndNeverEchoesTheKey(t *testing.T) {
-	client, _, _ := serve(t, 401, `{"detail":"bad key `+testKey+`"}`)
-
-	_, err := client.List(context.Background(), time.Now())
-
-	if err == nil {
-		t.Fatal("a 401 must be an error")
-	}
-	if strings.Contains(err.Error(), testKey) {
-		t.Fatalf("error leaked the key: %v", err)
-	}
-	if !strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), "GANGOLF_API_KEY") {
-		t.Fatalf("error = %v, want the status and a hint naming the variable", err)
-	}
-}
-
-func TestListServerErrorIsAnError(t *testing.T) {
-	client, _, _ := serve(t, 500, `oops`)
-
-	if _, err := client.List(context.Background(), time.Now()); err == nil || !strings.Contains(err.Error(), "500") {
-		t.Fatalf("err = %v, want a 500 error", err)
-	}
-}
-
-func TestListMalformedPageIsAnError(t *testing.T) {
-	client, _, _ := serve(t, 200, `[1,2,3]`)
-
-	if _, err := client.List(context.Background(), time.Now()); err == nil {
-		t.Fatal("a body that is not a page must be an error")
-	}
-}
-
-func TestTransportErrorNeverEchoesTheKey(t *testing.T) {
-	roundTrip := roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		return nil, &echoError{text: "dial failed for " + r.Header.Get("Authorization")}
+		keys = append(keys, key[0])
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body) != 5 || body["service"] != "Twitch" || body["channel"] != "123" || body["tts"] != false {
+			t.Fatalf("body=%v", body)
+		}
+		user := body["user"].(map[string]any)
+		if len(user) != 3 || user["service"] != "Twitch" || user["serviceId"] != "GangolfBot" || user["name"] != "GangolfBot" {
+			t.Fatalf("user=%v", user)
+		}
+		body["id"] = "10"
+		body["delivery"] = map[string]string{"state": "sent", "messageId": "twitch-send", "requestKey": key[0]}
+		w.WriteHeader(201)
+		json.NewEncoder(w).Encode(body)
 	})
-	client := messages.New("http://example.invalid", testKey, "GangolfBot", &http.Client{Transport: roundTrip}, quiet())
-
-	_, err := client.List(context.Background(), time.Now())
-
-	if err == nil || strings.Contains(err.Error(), testKey) {
-		t.Fatalf("err = %v, want an error without the key", err)
+	for range 2 {
+		if err := client.Post(context.Background(), window.Key{Service: "Twitch", Channel: "123"}, "expected reply"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(keys) != 2 || keys[0] == keys[1] {
+		t.Fatalf("keys=%v", keys)
+	}
+}
+func TestV3PostRequiresConfirmedSent(t *testing.T) {
+	for _, mode := range []string{"sent200", "sent201", "unknown", "failed", "missing", "wrong-key", "wrong-channel", "wrong-author", "wrong-text", "no-id", "no-message-id", "no-tts", "wrong-tts", "reply-to", "malformed", "401", "403", "422", "429", "502", "503", "redirect"} {
+		t.Run(mode, func(t *testing.T) {
+			attempts := 0
+			client := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+				attempts++
+				var body map[string]any
+				json.NewDecoder(r.Body).Decode(&body)
+				if len(mode) == 3 && mode[0] >= '4' && mode[0] <= '5' {
+					status := 0
+					for _, c := range mode {
+						status = status*10 + int(c-'0')
+					}
+					w.WriteHeader(status)
+					io.WriteString(w, testKey)
+					return
+				}
+				if mode == "redirect" {
+					w.Header().Set("Location", "/elsewhere")
+					w.WriteHeader(307)
+					return
+				}
+				if mode == "malformed" {
+					io.WriteString(w, `broken `+testKey)
+					return
+				}
+				body["id"] = "10"
+				delivery := map[string]string{"state": "sent", "messageId": "twitch-id", "requestKey": r.Header.Get("Idempotency-Key")}
+				body["delivery"] = delivery
+				switch mode {
+				case "unknown", "failed":
+					delivery["state"] = mode
+				case "missing":
+					delete(body, "delivery")
+				case "wrong-key":
+					delivery["requestKey"] = "different"
+				case "wrong-channel":
+					body["channel"] = "456"
+				case "wrong-author":
+					body["user"] = map[string]string{"name": "other"}
+				case "wrong-text":
+					body["chunks"] = []map[string]any{{"type": 0, "data": "other"}}
+				case "no-id":
+					delete(body, "id")
+				case "no-message-id":
+					delivery["messageId"] = ""
+				case "no-tts":
+					delete(body, "tts")
+				case "wrong-tts":
+					body["tts"] = true
+				case "reply-to":
+					body["replyTo"] = "100"
+				}
+				if mode == "sent201" {
+					w.WriteHeader(201)
+				}
+				json.NewEncoder(w).Encode(body)
+			})
+			err := client.Post(context.Background(), window.Key{Service: "Twitch", Channel: "123"}, "reply")
+			success := mode == "sent200" || mode == "sent201"
+			if attempts != 1 || (err == nil) != success {
+				t.Fatalf("attempts=%d err=%v", attempts, err)
+			}
+			if err != nil && strings.Contains(err.Error(), testKey) {
+				t.Fatal("credential leaked")
+			}
+		})
+	}
+}
+func TestV3TransportAndAuthenticationErrorsNeverExposeSecrets(t *testing.T) {
+	client := messages.New("http://example.invalid", testKey, "99", &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) { return nil, errors.New(testKey) })}, quiet())
+	for _, err := range []error{func() error { _, e := client.List(context.Background(), time.Now()); return e }(), client.Post(context.Background(), window.Key{Service: "Twitch", Channel: "123"}, "reply")} {
+		if err == nil || strings.Contains(err.Error(), testKey) {
+			t.Fatalf("err=%v", err)
+		}
 	}
 }
 
@@ -207,127 +189,35 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-type echoError struct{ text string }
-
-func (e *echoError) Error() string { return e.text }
-
-func TestPostBodyShape(t *testing.T) {
-	client, seen, body := serve(t, 200, `{}`)
-
-	err := client.Post(context.Background(), window.Key{Service: "twitch", Channel: "stream"}, "hello chat")
-
-	if err != nil {
-		t.Fatal(err)
-	}
-	if seen.Method != http.MethodPost || seen.URL.Path != "/api/v1/messages" {
-		t.Fatalf("request = %s %s, want POST /api/v1/messages", seen.Method, seen.URL.Path)
-	}
-	if got := seen.Header.Get("Content-Type"); got != "application/json" {
-		t.Fatalf("content type = %q", got)
-	}
-	if got := seen.Header.Get("Authorization"); got != "Bearer "+testKey {
-		t.Fatalf("authorization header did not carry the bearer key")
-	}
-	var posted []map[string]any
-	if err := json.Unmarshal([]byte(*body), &posted); err != nil || len(posted) != 1 {
-		t.Fatalf("body = %s err = %v, want a one element array", *body, err)
-	}
-	message := posted[0]
-	if message["service"] != "twitch" || message["channel"] != "stream" || message["tts"] != true {
-		t.Fatalf("message = %v", message)
-	}
-	user := message["user"].(map[string]any)
-	if user["service"] != "twitch" || user["serviceId"] != "GangolfBot" || user["name"] != "GangolfBot" {
-		t.Fatalf("user = %v", user)
-	}
-	chunks := message["chunks"].([]any)
-	chunk := chunks[0].(map[string]any)
-	if len(chunks) != 1 || chunk["type"] != float64(0) || chunk["data"] != "hello chat" {
-		t.Fatalf("chunks = %v", chunks)
-	}
-}
-
-func TestPostUsesTheConfiguredBotNameAsDisplayName(t *testing.T) {
-	var body string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
-		body = string(raw)
-	}))
-	defer server.Close()
-	client := messages.New(server.URL, testKey, "Gangolf", server.Client(), quiet())
-
-	if err := client.Post(context.Background(), window.Key{Service: "s", Channel: "c"}, "x"); err != nil {
-		t.Fatal(err)
-	}
-
-	if !strings.Contains(body, `"name":"Gangolf"`) || !strings.Contains(body, `"serviceId":"GangolfBot"`) {
-		t.Fatalf("body = %s, want the display name from configuration and the fixed service id", body)
-	}
-}
-
-func TestPostFailureIsAnErrorWithoutTheKey(t *testing.T) {
-	client, _, _ := serve(t, 403, `forbidden `+testKey)
-
-	err := client.Post(context.Background(), window.Key{Service: "s", Channel: "c"}, "x")
-
-	if err == nil || strings.Contains(err.Error(), testKey) || !strings.Contains(err.Error(), "403") {
-		t.Fatalf("err = %v, want a 403 error without the key", err)
-	}
-}
-
-func TestPostToAPlatformChannelNamesThatChannelAsItsOwnTarget(t *testing.T) {
-	client, _, body := serve(t, 200, `{}`)
-
-	if err := client.Post(context.Background(), window.Key{Service: "Twitch", Channel: "rugenforth"}, "hi"); err != nil {
-		t.Fatal(err)
-	}
-
-	var posted []map[string]any
-	if err := json.Unmarshal([]byte(*body), &posted); err != nil {
-		t.Fatal(err)
-	}
-	targets, ok := posted[0]["postTo"].([]any)
-	if !ok || len(targets) != 1 {
-		t.Fatalf("postTo = %v, want exactly one target", posted[0]["postTo"])
-	}
-	target := targets[0].(map[string]any)
-	if len(target) != 2 || target["service"] != "Twitch" || target["name"] != "rugenforth" {
-		t.Fatalf("target = %v, want {service: Twitch, name: rugenforth}", target)
-	}
-}
-
-func TestPostToALocalhostChannelCarriesNoPostTo(t *testing.T) {
-	for _, service := range []string{"localhost", "Localhost"} {
-		client, _, body := serve(t, 200, `{}`)
-
-		if err := client.Post(context.Background(), window.Key{Service: service, Channel: "host"}, "hi"); err != nil {
-			t.Fatal(err)
+func TestV3PostDisablesTransportReplayAndReportsSafeFailureReference(t *testing.T) {
+	attempts := 0
+	client := messages.New("http://example.invalid", testKey, "99", &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempts++
+		if r.GetBody != nil {
+			t.Error("post body is replayable")
 		}
-
-		if strings.Contains(*body, "postTo") {
-			t.Fatalf("service %s body = %s, want no postTo so the post is stored directly", service, *body)
+		if r.Header.Get("Idempotency-Key") == "" {
+			t.Error("missing request key")
+		}
+		return &http.Response{StatusCode: 503, Body: io.NopCloser(strings.NewReader(`{"id":"1234","code":"delivery_outcome_unknown","text":"` + testKey + `"}`)), Header: make(http.Header)}, nil
+	})}, quiet())
+	err := client.Post(context.Background(), window.Key{Service: "Twitch", Channel: "123"}, "reply")
+	if attempts != 1 || err == nil || !strings.Contains(err.Error(), "id=1234") || !strings.Contains(err.Error(), "code=delivery_outcome_unknown") || strings.Contains(err.Error(), testKey) {
+		t.Fatalf("attempts=%d err=%v", attempts, err)
+	}
+}
+func TestV3PostRejectsUnsupportedTargetsBeforeHTTP(t *testing.T) {
+	attempts := 0
+	client := messages.New("http://example.invalid", testKey, "99", &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempts++
+		return nil, errors.New("unexpected request")
+	})}, quiet())
+	for _, key := range []window.Key{{Service: "twitch", Channel: "123"}, {Service: "Twitch", Channel: "login"}, {Service: "Twitch", Channel: "01"}} {
+		if err := client.Post(context.Background(), key, "reply"); err == nil {
+			t.Fatal("unsupported target accepted")
 		}
 	}
-}
-
-func TestTheReadBackOfAReplyIsRecognisedAsGangolfsOwnAndNeverAnswered(t *testing.T) {
-	client, _, _ := serve(t, 200, `{"result":[{"service":"Twitch","channel":"rugenforth","user":{"name":"GangolfBot"},"time":"2026-10-14T12:41:14","chunks":[
-		{"type":"User","data":"Gangolf"},
-		{"type":"Text","data":"hello chat"}
-	]}],"total":1}`)
-	lines, err := client.List(context.Background(), time.Now())
-	if err != nil || len(lines) != 1 {
-		t.Fatalf("lines = %+v err = %v", lines, err)
-	}
-	if lines[0].Text != "hello chat" || lines[0].Speaker != "GangolfBot" {
-		t.Fatalf("line = %+v, want the text without the leading User chunk, spoken by GangolfBot", lines[0])
-	}
-
-	windows := window.New("GangolfBot")
-	now := time.Now()
-	windows.Ingest(lines, now)
-
-	if key, ready := windows.Next(now.Add(time.Hour), time.Second); ready {
-		t.Fatalf("channel %v is ready to be answered, want Gangolf's own line to stay unanswered", key)
+	if attempts != 0 {
+		t.Fatalf("attempts=%d", attempts)
 	}
 }

@@ -25,7 +25,7 @@ func run(ctx context.Context, lookup func(string) (string, bool), log *slog.Logg
 	}
 	logStartup(log, cfg)
 
-	messageClient := messages.New(cfg.apiURL, cfg.apiKey, cfg.botName, nil, log)
+	messageClient := messages.New(cfg.apiURL, cfg.apiKey, cfg.twitchBotUserID, nil, log)
 	processorClient := processor.New(cfg.processorURL, cfg.subject, cfg.processorConfig, nil)
 	reviewer := processor.New(cfg.processorURL, cfg.subject, cfg.memoryConfig, &http.Client{Timeout: processor.MemoryReviewTimeout})
 	core.New(core.Config{

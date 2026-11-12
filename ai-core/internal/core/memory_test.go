@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/telmengedar/gangolf/ai-core/internal/core"
+	"github.com/telmengedar/gangolf/ai-core/internal/messages"
 	"github.com/telmengedar/gangolf/ai-core/internal/processor"
 	"github.com/telmengedar/gangolf/ai-core/internal/window"
 )
@@ -117,6 +118,7 @@ func TestUndeliveredTurnsNeverQueueMemoryReview(t *testing.T) {
 		{name: "withheld", result: processor.Result{Silent: true, Failed: true, Reply: "fallback"}},
 		{name: "empty", result: processor.Result{Reply: " !! Gangolf: "}},
 		{name: "run failure", runErr: errors.New("failed")},
+		{name: "IRC submitted", result: processor.Result{Reply: "a reply"}, postErr: &messages.UnconfirmedSubmission{ID: "77", RequestKey: "safe-key"}},
 		{name: "post failure", result: processor.Result{Reply: "a reply"}, postErr: errors.New("failed")},
 		{name: "repeat withheld", result: processor.Result{Reply: "old answer"}, retry: true},
 		{name: "too short", input: "hi", minimum: 4, result: processor.Result{Reply: "a reply"}},
@@ -135,7 +137,8 @@ func TestUndeliveredTurnsNeverQueueMemoryReview(t *testing.T) {
 			if input == "" {
 				input = "hello Gangolf"
 			}
-			c := core.New(core.Config{Routes: selfRoutes(channel), BotName: "GangolfBot", Interval: time.Nanosecond, MinWords: map[window.Key]int{channel: tc.minimum}, MemoryReviewer: reviewer}, r.messages, r.runner, slog.New(slog.NewTextHandler(io.Discard, nil)), func() time.Time { return r.clock })
+			logs := &memoryLog{}
+			c := core.New(core.Config{Routes: selfRoutes(channel), BotName: "GangolfBot", Interval: time.Nanosecond, MinWords: map[window.Key]int{channel: tc.minimum}, MemoryReviewer: reviewer}, r.messages, r.runner, slog.New(slog.NewTextHandler(logs, nil)), func() time.Time { return r.clock })
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			r.messages.onList = func(n int) {
@@ -149,6 +152,15 @@ func TestUndeliveredTurnsNeverQueueMemoryReview(t *testing.T) {
 				}
 			}
 			finishes(t, "core did not stop", func() { c.Run(ctx) })
+			if tc.name == "IRC submitted" && (len(r.runner.calls) != 1 || len(r.messages.posts) != 1) {
+				t.Fatalf("submission scenario runs=%d posts=%d", len(r.runner.calls), len(r.messages.posts))
+			}
+			if tc.name == "IRC submitted" && !strings.Contains(logs.String(), "outcome=submitted") {
+				t.Fatalf("submission outcome missing: %s", logs.String())
+			}
+			if strings.Contains(logs.String(), "memory review") {
+				t.Fatalf("undelivered turn offered private review: %s", logs.String())
+			}
 			select {
 			case got := <-reviewer.calls:
 				t.Fatalf("undelivered turn reviewed=%+v", got)
