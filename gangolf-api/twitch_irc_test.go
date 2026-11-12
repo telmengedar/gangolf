@@ -337,3 +337,20 @@ func TestIRCSession_OversizedRecord_ClosesBoundedReader(t *testing.T) {
 	}
 	assertNoIRCFrame(t, fake)
 }
+
+func TestIRCSession_CapabilitiesBeforeAuthentication_ReceivesAuthenticationTimeGlobalIdentity(t *testing.T) {
+	_, s, tw, p := ircProfileFixture(t)
+	fake := newIRCFake(t, tw.client, ircWelcome)
+	_, _ = startIRCFixture(t, s, p)
+	select {
+	case <-fake.connected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("IRC authentication and join did not complete")
+	}
+	waitIRCReady(t, s, p)
+	credential, err := readProfileCredential(tw.client.directory, p)
+	if err != nil || !s.twitch.ircReady(p, credential) {
+		t.Fatal("authentication-time global identity did not enable readiness")
+	}
+	assertNoIRCFrame(t, fake)
+}
