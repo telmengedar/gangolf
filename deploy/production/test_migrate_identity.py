@@ -24,9 +24,10 @@ def fixture():
     result = {}
     def node(node_id, kind, name, payload=None):
         result[node_id] = dict(id=node_id, type=kind, name=name, ownerId=3, rootNodeId=1,
-                               access=0, skipEmbedding=True, contentType='application/json',
+                               access=0, skipEmbedding=True, created='2026-11-14T00:00:00Z', x=0, y=0, contentType='application/json',
                                content=None if payload is None else json.dumps(payload), linkDetails=[])
     node(1, 'project', 'Gangolf')
+    result[1]['rootNodeId'] = None
     for group, name in m.NAMES.items():
         node(group, None, name)
     node(6, 'processor-config', 'chat')
@@ -38,7 +39,7 @@ def fixture():
     node(45, 'gangolf-twitch-config', 'profile', {'schemaVersion': 2, 'authConfigId': '44', 'tenantUserId': '42', 'channelId': '43'})
     node(65, 'message', 'message', {'schemaVersion': 1, 'userId': '42', 'channelId': '43', 'time': '2026-11-14T00:00:00Z'})
     node(49, 'session-log', 'Processor archive')
-    result[49]['access'] = 'ReadWrite'
+    result[49]['access'] = 'Read, Write'
     relations = [edge(i, 1) for i in range(2, 6)] + [edge(6, 5), edge(7, 5), edge(49, 8)]
     relations += [edge(i, m.GROUPS[result[i]['type']]) for i in (42, 43, 44, 45, 65)]
     relations += [edge(45, 44, 'Unidirectional', 'uses-auth-config'), edge(45, 43, 'Unidirectional', 'configured-for'),
@@ -60,7 +61,7 @@ class FakeAPI:
         query = query or {}
         if method == 'GET' and path == '/nodes':
             selected = [copy.deepcopy(n) for n in self.state.values()
-                        if ('rootNodeId' not in query or n['rootNodeId'] == query['rootNodeId'])
+                        if ('rootNodeId' not in query or n.get('rootNodeId') == query['rootNodeId'])
                         and ('id' not in query or n['id'] == query['id'])]
             selected.sort(key=lambda n: n['id'])
             start, count = query.get('continue', 0), min(query.get('count', 500), 3)
@@ -69,7 +70,7 @@ class FakeAPI:
         if method == 'POST' and path == '/nodes':
             node_id = max(self.state) + 1
             self.state[node_id] = dict(id=node_id, type=None, rootNodeId=None, ownerId=self.owner,
-                access=0, content=None, contentType=None, linkDetails=[], **{k: v for k, v in body.items() if k not in ('type', 'rootNodeId', 'access')})
+                access=0, content=None, contentType=None, created='2026-11-14T00:00:00Z', x=0, y=0, linkDetails=[], **{k: v for k, v in body.items() if k not in ('type', 'rootNodeId', 'access')})
             self.state[node_id].update(body)
             response = copy.deepcopy(self.state[node_id])
         else:
@@ -175,6 +176,7 @@ class MigrationChecks(unittest.TestCase):
                 if node.get(field) is None:
                     node.pop(field, None)
         snapshot = m.nodes(FakeAPI(projected), rootNodeId=1)
+        snapshot.update(m.nodes(FakeAPI(projected), id=1))
         self.assertIsNone(snapshot[2]['type'])
         self.assertEqual(set(m.classify(snapshot)), {42, 43, 44, 45, 65})
         for critical in ('id', 'ownerId', 'access'):
@@ -187,6 +189,40 @@ class MigrationChecks(unittest.TestCase):
         projected[42] = invalid
         with self.assertRaises(m.Refused):
             m.classify(projected)
+
+    def test_declared_access_flags_and_masks_preserve_raw_archive_evidence(self):
+        for wire, expected in [('None', 0), ('Read', 1), ('Write', 2), ('Read, Write', 3),
+                               (' Write , Read ', 3), (0, 0), (1, 1), (2, 2), (3, 3)]:
+            with self.subTest(wire=wire):
+                self.assertEqual(m.access_mask(wire), expected)
+        for wire in (None, False, True, -1, 4, 8, 'ReadWrite', '3', 'Read, None', 'Read,,Write',
+                     'Execute', 'Read, Read', [], {}):
+            with self.subTest(invalid=wire):
+                with self.assertRaises(m.Refused):
+                    m.access_mask(wire)
+        snapshot = m.nodes(self.admin, rootNodeId=1)
+        snapshot.update(m.nodes(self.admin, id=1))
+        self.assertEqual(snapshot[49]['access'], 'Read, Write')
+        self.assertEqual(m.stable(snapshot[49])['access'], 3)
+        self.assertEqual(set(m.classify(snapshot)), {42, 43, 44, 45, 65})
+        self.assertEqual(m.access_mask(snapshot[44]['access']), 0)
+
+    def test_requested_boolean_coordinates_timestamp_and_adjacency_remain_required(self):
+        for field in ('access', 'skipEmbedding', 'x', 'y', 'created', 'linkDetails'):
+            missing = copy.deepcopy(self.original[42])
+            missing.pop(field)
+            with self.subTest(missing=field), self.assertRaises(m.Refused):
+                m.normalize(missing)
+        for field, value in [('x', True), ('x', float('inf')), ('y', float('nan')), ('skipEmbedding', None)]:
+            invalid = copy.deepcopy(self.original[42])
+            invalid[field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(m.Refused):
+                m.normalize(invalid)
+        valid = copy.deepcopy(self.original[42])
+        valid.update(skipEmbedding=False, x=0, y=0.0, linkDetails=[])
+        normalized = m.normalize(valid)
+        self.assertIs(normalized['skipEmbedding'], False)
+        self.assertEqual((normalized['x'], normalized['y'], normalized['linkDetails']), (0, 0.0, []))
 
     def test_unknown_cross_boundary_edge_refused_before_writes(self):
         relation = edge(65, 8, 'Unidirectional', 'replies-to')

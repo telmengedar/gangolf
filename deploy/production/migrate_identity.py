@@ -5,6 +5,7 @@ import base64
 import copy
 import getpass
 import json
+import math
 import os
 from pathlib import Path
 import stat
@@ -181,15 +182,32 @@ def paged(client, path, query):
 
 
 NULLABLE_FIELDS = ('type', 'status', 'severity', 'refinement', 'rootNodeId', 'content',
-                   'contentType', 'skipEmbedding', 'x', 'y', 'substance')
+                   'contentType', 'substance')
+
+
+def access_mask(value):
+    if type(value) is int:
+        require(0 <= value <= 3, 'invalid node access bits')
+        return value
+    require(isinstance(value, str), 'missing/invalid node access')
+    tokens = [token.strip() for token in value.split(',')]
+    if tokens == ['None']:
+        return 0
+    require(len(tokens) == len(set(tokens)) and all(token in ('Read', 'Write') for token in tokens), 'invalid node access flags')
+    mask = 0
+    for token in tokens:
+        mask |= {'Read': 1, 'Write': 2}[token]
+    return mask
 
 
 def normalize(node):
     require(isinstance(node, dict) and type(node.get('id')) is int and node['id'] > 0
             and type(node.get('ownerId')) is int and node['ownerId'] > 0
             and isinstance(node.get('name'), str) and isinstance(node.get('linkDetails'), list), 'missing critical node metadata')
-    access = node.get('access')
-    require(type(access) is int and 0 <= access <= 2 or access in ('None', 'Read', 'ReadWrite'), 'missing/invalid node access')
+    access_mask(node.get('access'))
+    require(type(node.get('skipEmbedding')) is bool and isinstance(node.get('created'), str)
+            and bool(node['created']), 'missing critical node metadata')
+    require(all(type(node.get(field)) in (int, float) and math.isfinite(node[field]) for field in ('x', 'y')), 'missing/invalid node coordinates')
     result = node.copy()
     for field in NULLABLE_FIELDS:
         result.setdefault(field, None)
@@ -228,7 +246,9 @@ def membership(edge, node_id, group):
 
 
 def stable(node):
-    return {key: value for key, value in normalize(node).items() if key not in ('lastUpdate', 'linkDetails')}
+    result = normalize(node)
+    result['access'] = access_mask(result['access'])
+    return {key: value for key, value in result.items() if key not in ('lastUpdate', 'linkDetails')}
 
 
 def positive(value):
@@ -242,11 +262,11 @@ def classify(snapshot):
     require(1 in snapshot and all(i in snapshot for i in range(2, 9)), 'missing Processor context')
     root = snapshot[1]
     require(root['name'] == 'Gangolf' and root['type'] == 'project' and root['ownerId'] == 3
-            and root['access'] in (0, 'None'), 'unexpected original root')
+            and access_mask(root['access']) == 0, 'unexpected original root')
     for group, name in NAMES.items():
         node = snapshot[group]
         require(node['name'] == name and node['type'] is None and node['rootNodeId'] == 1
-                and node['ownerId'] == 3 and node['access'] in (0, 'None')
+                and node['ownerId'] == 3 and access_mask(node['access']) == 0
                 and any(membership(edge, group, 1) for edge in edges(node)), 'unexpected original group')
     require(all(i <= 8 or node['type'] in GROUPS or node['type'] in ('processor-config', 'agent', 'session-log')
                 for i, node in snapshot.items()), 'unclassified root resource type')
@@ -255,7 +275,7 @@ def classify(snapshot):
     require(not set(range(1, 9)) & app.keys(), 'Processor context misclassified')
     payloads = {}
     for node_id, node in app.items():
-        require(node['rootNodeId'] == 1 and node['ownerId'] == 3 and node['access'] in (0, 'None'), 'app ownership/privacy mismatch')
+        require(node['rootNodeId'] == 1 and node['ownerId'] == 3 and access_mask(node['access']) == 0, 'app ownership/privacy mismatch')
         content = node.get('content')
         if content is None or content == '':
             require(node['type'] in ('message', 'gangolf-message-batch', 'user', 'channel'), 'incomplete config')
@@ -384,7 +404,7 @@ class Migration:
         containers = self.journal.data['containers']
         root = nodes(self.target, id=containers['root'])[containers['root']]
         require(root['name'] == 'Gangolf' and root['type'] == 'project' and root['ownerId'] == 4
-                and root['access'] in (0, 'None'), 'new root metadata mismatch')
+                and access_mask(root['access']) == 0, 'new root metadata mismatch')
         children = nodes(self.target, rootNodeId=containers['root'])
         for group, name in NAMES.items():
             group_id = containers[str(group)]
@@ -392,7 +412,7 @@ class Migration:
                     'new group missing/ambiguous')
             child = children[group_id]
             require(child['name'] == name and child['type'] is None and child['ownerId'] == 4
-                    and child['access'] in (0, 'None') and child.get('skipEmbedding') is True
+                    and access_mask(child['access']) == 0 and child.get('skipEmbedding') is True
                     and any(membership(e, group_id, containers['root']) for e in edges(child))
                     and any(membership(e, group_id, containers['root']) for e in edges(root)), 'new group metadata/edge mismatch')
 
