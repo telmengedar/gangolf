@@ -210,6 +210,25 @@ class ArchiveTests(unittest.TestCase):
         with self.assertRaises(a.Refused):
             self.archive().verify()
 
+    def test_raw_boolean_number_corruption_refused_despite_unchanged_digest(self):
+        self.archive().run()
+        victim = next(n for n in self.graph.nodes.values() if n['type'] == 'legacy-archive-message')
+        original = victim['content']
+        for altered_id in (False, 0.0):
+            with self.subTest(altered_type=type(altered_id).__name__):
+                payload = json.loads(original)
+                payload['raw']['user']['id'] = altered_id
+                self.assertNotEqual(a.digest(a.canonical(payload['raw'])), payload['recordSha256'])
+                victim['content'] = json.dumps(payload)
+                posts = self.graph.posts.copy()
+                with self.assertRaises(a.Refused):
+                    self.archive().verify()
+                with self.assertRaises(a.Refused):
+                    self.archive().run()
+                self.assertEqual(self.graph.posts, posts)
+        self.assertFalse(a.same_json({'id': 0}, {'id': False}))
+        self.assertFalse(a.same_json({'id': 0}, {'id': 0.0}))
+
     def test_existing_structured_credential_preserves_equals_without_logging(self):
         path = self.directory / 'credential'
         a.private_write(path, b'User=synthetic\nUserId=4\nKey=synthetic==\n')

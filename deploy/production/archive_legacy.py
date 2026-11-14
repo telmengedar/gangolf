@@ -38,6 +38,10 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode()
 
 
+def same_json(actual, expected):
+    return canonical(actual) == canonical(expected)
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -356,14 +360,14 @@ class Archive:
             if payload is not None:
                 content = node.get('content')
                 require(content in (None, '') or (node.get('contentType', '').split(';')[0] == 'application/json'
-                        and decode(content) == payload), 'target content conflict')
+                        and same_json(decode(content), payload)), 'target content conflict')
                 if content in (None, ''):
                     try:
                         self.client.request('POST', '/nodes/' + str(node['id']) + '/content', payload)
                         self.changes['content'] += 1
                     except Refused:
                         actual = self.read_node(node['id'])
-                        require(actual.get('content') and decode(actual['content']) == payload, 'content outcome unresolved; rerun to reconcile')
+                        require(actual.get('content') and same_json(decode(actual['content']), payload), 'content outcome unresolved; rerun to reconcile')
             for link_type, context, target_name in relations:
                 edge = (node['id'], self.names[target_name]['id'], link_type, context)
                 if edge not in edge_set(node):
@@ -390,7 +394,7 @@ class Archive:
                 require(node.get('content') in (None, ''), 'unexpected structural content')
             else:
                 require(node.get('contentType', '').split(';')[0] == 'application/json'
-                        and decode(node.get('content') or 'null') == payload, 'full content/digest verification failed')
+                        and same_json(decode(node.get('content') or 'null'), payload), 'full content/digest verification failed')
             expected_edges.update((node['id'], self.names[name]['id'], kind, context) for kind, context, name in relations)
         incident = {node['id']: set() for node in self.names.values()}
         for edge in expected_edges:
@@ -438,7 +442,7 @@ def main():
         else:
             require(args.plan is not None and args.journal is not None and args.credential is not None, 'plan/journal/target credential required')
             plan = decode(private_read(args.plan))
-            require(plan == plan_capture(args.capture, plan['pilotLimit']), 'plan does not match frozen capture')
+            require(same_json(plan, plan_capture(args.capture, plan['pilotLimit'])), 'plan does not match frozen capture')
             require(args.phase != 'import' or plan['pilotLimit'] is not None or args.full_import_authorized,
                     'full import requires measured pilot and explicit operator attestation')
             client = HTTP(args.target, credential(args.credential))
