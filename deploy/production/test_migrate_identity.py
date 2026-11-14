@@ -168,6 +168,26 @@ class MigrationChecks(unittest.TestCase):
         self.migration.rollback()
         self.assert_original()
 
+    def test_omitted_nullable_metadata_normalizes_without_masking_missing_critical_fields(self):
+        projected = copy.deepcopy(self.original)
+        for node in projected.values():
+            for field in m.NULLABLE_FIELDS:
+                if node.get(field) is None:
+                    node.pop(field, None)
+        snapshot = m.nodes(FakeAPI(projected), rootNodeId=1)
+        self.assertIsNone(snapshot[2]['type'])
+        self.assertEqual(set(m.classify(snapshot)), {42, 43, 44, 45, 65})
+        for critical in ('id', 'ownerId', 'access'):
+            invalid = copy.deepcopy(self.original[42])
+            invalid.pop(critical)
+            with self.assertRaises(m.Refused):
+                m.normalize(invalid)
+        invalid = copy.deepcopy(self.original[42])
+        invalid.pop('rootNodeId')
+        projected[42] = invalid
+        with self.assertRaises(m.Refused):
+            m.classify(projected)
+
     def test_unknown_cross_boundary_edge_refused_before_writes(self):
         relation = edge(65, 8, 'Unidirectional', 'replies-to')
         self.original[65]['linkDetails'].append(relation)
@@ -331,46 +351,55 @@ class RuntimeChecks(unittest.TestCase):
 
 
 class LoopbackTransportChecks(unittest.TestCase):
-    def test_host_loopback_keeps_stdin_open_and_decodes_chunked_response(self):
+    def test_pinned_python_get_uses_json_stdin_and_stdlib_http(self):
         calls = []
-        real_popen = subprocess.Popen
-        script = """
-import os,select,sys
-request = os.read(0,4096)
-assert b'Authorization: Bearer synthetic-api-secret\\r\\n' in request
-assert request.startswith(b'GET /api/v3/messages?continue=0 HTTP/1.1')
-ready = select.select([sys.stdin], [], [], 0.05)[0]
-if ready and not os.read(0,1):
-    os.write(1,b'HTTP/1.1 503 Cancelled\\r\\nContent-Length:0\\r\\n\\r\\n')
-else:
-    payload = b'{"result":[],"total":0,"continue":null}'
-    os.write(1,b'HTTP/1.1 200 OK\\r\\nTransfer-Encoding: chunked\\r\\n\\r\\n' + format(len(payload),'x').encode() + b'\\r\\n' + payload + b'\\r\\n0\\r\\n\\r\\n')
+        real_run = subprocess.run
+        fixture_code = r"""
+import urllib.request
+class Response:
+    status=200
+    def __enter__(self): return self
+    def __exit__(self,*args): pass
+    def read(self,limit):
+        assert limit==64*1024*1024+1
+        return b'{"result":[],"total":0,"continue":null}'
+class Opener:
+    def open(self,request,timeout):
+        assert request.full_url=='http://127.0.0.1:8092/api/v3/messages?continue=0'
+        assert request.get_header('Authorization')=='Bearer synthetic-api-secret'
+        assert request.method=='GET' and timeout==20
+        return Response()
+def opener(*handlers):
+    assert any(isinstance(h,urllib.request.ProxyHandler) and h.proxies=={} for h in handlers)
+    assert any(h.__class__.__name__=='NoRedirect' for h in handlers)
+    return Opener()
+urllib.request.build_opener=opener
 """
         def fake(command, **kwargs):
             calls.append((command, kwargs))
-            return real_popen([sys.executable, '-c', script], **kwargs)
-        with patch.object(m.subprocess, 'Popen', side_effect=fake):
-            result = m.LoopbackAPI('sha256:pinned', 'synthetic-api-secret').request('GET', '/v3/messages', query={'continue': 0})
+            return real_run([sys.executable, '-c', fixture_code + command[-1]], **kwargs)
+        with patch.object(m.subprocess, 'run', side_effect=fake):
+            result = m.LoopbackAPI('synthetic-api-secret').request('GET', '/v3/messages', query={'continue': 0})
         self.assertEqual(result['total'], 0)
         command, kwargs = calls[0]
-        self.assertEqual(command[-2:], ['127.0.0.1', '8092'])
+        self.assertIn(m.HTTP_HELPER_IMAGE, command)
+        self.assertIn('never', command)
         self.assertIn('host', command)
-        self.assertIn('nc', command)
-        self.assertIn('-i', command)
+        self.assertIn('python', command)
         self.assertNotIn('synthetic-api-secret', repr(command))
         self.assertNotIn('env', kwargs)
-        self.assertEqual(kwargs['stdin'], subprocess.PIPE)
+        self.assertEqual(json.loads(kwargs['input']), {'token': 'synthetic-api-secret', 'path': '/v3/messages', 'query': {'continue': 0}})
 
-    def test_loopback_refuses_post_redirect_and_header_injection(self):
-        client = m.LoopbackAPI('sha256:pinned', 'synthetic-api-secret')
-        with patch.object(m.subprocess, 'Popen') as run:
+    def test_loopback_refuses_post_remote_failure_and_header_injection(self):
+        client = m.LoopbackAPI('synthetic-api-secret')
+        with patch.object(m.subprocess, 'run') as run:
             with self.assertRaises(m.Refused):
                 client.request('POST', '/v3/messages', {})
             with self.assertRaises(m.Refused):
-                m.LoopbackAPI('sha256:pinned', 'bad\r\nheader').request('GET', '/v3/messages')
+                m.LoopbackAPI('bad\r\nheader').request('GET', '/v3/messages')
             run.assert_not_called()
-        redirect = b'HTTP/1.1 302 Found\r\nLocation: http://elsewhere\r\nContent-Length: 0\r\n\r\n'
-        with patch.object(m, 'loopback_exchange', return_value=redirect):
+        failure = subprocess.CompletedProcess([], 0, stdout=b'{"ok":false}', stderr=b'private remote diagnostic')
+        with patch.object(m.subprocess, 'run', return_value=failure):
             with self.assertRaises(m.Refused):
                 client.request('GET', '/v3/messages')
 
@@ -392,6 +421,8 @@ class RunningEngine(FakeEngine):
             self.state[name] = {'Id': name, 'Name': '/' + name, 'State': {'Running': True}}
 
     def request(self, method, path, body=None, query=None):
+        if method == 'GET' and path == '/images/' + m.HTTP_HELPER_IMAGE + '/json':
+            return {'Id': m.HTTP_HELPER_IMAGE}
         if method == 'GET' and path == '/containers/json':
             return [{'Id': 'core', 'State': 'running', 'ImageID': 'sha256:core'}]
         return super().request(method, path, body, query)
@@ -442,7 +473,7 @@ class FullCutoverChecks(unittest.TestCase):
                 return response
 
         class Loopback:
-            def __init__(self, image, token):
+            def __init__(self, token):
                 pass
 
             def request(self, method, path, body=None, query=None):

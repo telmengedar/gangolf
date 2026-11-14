@@ -4,11 +4,8 @@ import argparse
 import base64
 import copy
 import getpass
-import http.client
-import io
 import json
 import os
-import selectors
 from pathlib import Path
 import stat
 import subprocess
@@ -111,67 +108,52 @@ class HTTP:
             raise Refused('HTTP request failed; mutation outcome may be unknown') from None
 
 
-def loopback_exchange(image, request):
-    require(len(request) <= 4096, 'loopback request exceeds bounded header size')
-    command = ['docker', '--host', 'tcp://gangolf:2375', 'run', '--pull', 'never',
-               '--rm', '-i', '--network', 'host', '--read-only', '--entrypoint', 'nc', image,
-               '-w', '20', '127.0.0.1', '8092']
-    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    output = bytearray()
-    deadline = time.monotonic() + 30
-    try:
-        process.stdin.write(request)
-        process.stdin.flush()
-        with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ)
-            selector.register(process.stderr, selectors.EVENT_READ)
-            while selector.get_map():
-                remaining = deadline - time.monotonic()
-                require(remaining > 0, 'loopback transport timed out')
-                ready = selector.select(remaining)
-                require(ready, 'loopback transport timed out')
-                for key, _ in ready:
-                    chunk = os.read(key.fileobj.fileno(), 65536)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                    elif key.fileobj is process.stdout:
-                        output.extend(chunk)
-                        require(len(output) <= 64 * 1024 * 1024, 'loopback response exceeded limit')
-        require(process.wait(timeout=max(0.01, deadline - time.monotonic())) == 0, 'loopback API transport failed')
-        return bytes(output)
-    finally:
-        process.stdin.close()
-        if process.poll() is None:
-            process.kill()
-            process.wait()
-        process.stdout.close()
-        process.stderr.close()
+HTTP_HELPER_IMAGE = 'sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1'
+HTTP_HELPER_CODE = r"""
+import base64,json,sys,urllib.parse,urllib.request
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs):
+        raise RuntimeError()
+try:
+    payload=json.load(sys.stdin)
+    token,path,query=payload['token'],payload['path'],payload['query']
+    if not isinstance(token,str) or '\r' in token or '\n' in token or path not in ('/i1/readiness','/v3/messages') or not isinstance(query,dict):
+        raise RuntimeError()
+    url='http://127.0.0.1:8092/api'+path
+    if query:
+        url+='?'+urllib.parse.urlencode(query)
+    headers={'Authorization':'Bearer '+token} if token else {}
+    request=urllib.request.Request(url,headers=headers,method='GET')
+    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
+    with opener.open(request,timeout=20) as response:
+        data=response.read(64*1024*1024+1)
+        if not 200<=response.status<300 or len(data)>64*1024*1024:
+            raise RuntimeError()
+        print(json.dumps({'ok':True,'status':response.status,'body':base64.b64encode(data).decode()}))
+except BaseException:
+    print(json.dumps({'ok':False}))
+"""
 
 
 class LoopbackAPI:
-    def __init__(self, image, token):
-        self.image, self.token = image, token
+    def __init__(self, token):
+        self.token = token
 
     def request(self, method, path, body=None, query=None):
         require(method == 'GET' and body is None and path in ('/i1/readiness', '/v3/messages'), 'loopback transport is GET-only')
-        require(self.image.startswith('sha256:') and '\r' not in self.token and '\n' not in self.token, 'invalid loopback transport parameters')
-        target = '/api' + path
-        if query:
-            target += '?' + urllib.parse.urlencode(query)
-        request = ('GET ' + target + ' HTTP/1.1\r\nHost: 127.0.0.1:8092\r\nConnection: close\r\n'
-                   + ('Authorization: Bearer ' + self.token + '\r\n' if self.token else '') + '\r\n').encode()
+        require('\r' not in self.token and '\n' not in self.token, 'invalid loopback transport token')
+        payload = json.dumps({'token': self.token, 'path': path, 'query': query or {}}).encode()
         try:
-            wire = loopback_exchange(self.image, request)
-            class Socket:
-                def makefile(self, *args, **kwargs):
-                    return io.BytesIO(wire)
-            response = http.client.HTTPResponse(Socket())
-            response.begin()
-            require(200 <= response.status < 300, 'loopback API request failed')
-            data = response.read(64 * 1024 * 1024 + 1)
+            result = subprocess.run(['docker', '--host', 'tcp://gangolf:2375', 'run', '--pull', 'never',
+                '--rm', '-i', '--network', 'host', '--read-only', '--entrypoint', 'python', HTTP_HELPER_IMAGE,
+                '-c', HTTP_HELPER_CODE], input=payload, capture_output=True, timeout=30, check=False)
+            require(result.returncode == 0 and len(result.stdout) <= 90 * 1024 * 1024, 'loopback API transport failed')
+            envelope = strict_json(result.stdout)
+            require(envelope.get('ok') is True and 200 <= envelope.get('status', 0) < 300, 'loopback API request failed')
+            data = base64.b64decode(envelope['body'], validate=True)
             require(len(data) <= 64 * 1024 * 1024, 'loopback API response exceeded limit')
             return strict_json(data) if data else None
-        except (subprocess.SubprocessError, OSError, ValueError, http.client.HTTPException):
+        except (subprocess.SubprocessError, OSError, ValueError, KeyError, TypeError):
             raise Refused('loopback API transport failed') from None
 
 
@@ -198,8 +180,28 @@ def paged(client, path, query):
         offset = next_offset
 
 
+NULLABLE_FIELDS = ('type', 'status', 'severity', 'refinement', 'rootNodeId', 'content',
+                   'contentType', 'skipEmbedding', 'x', 'y', 'substance')
+
+
+def normalize(node):
+    require(isinstance(node, dict) and type(node.get('id')) is int and node['id'] > 0
+            and type(node.get('ownerId')) is int and node['ownerId'] > 0
+            and isinstance(node.get('name'), str) and isinstance(node.get('linkDetails'), list), 'missing critical node metadata')
+    access = node.get('access')
+    require(type(access) is int and 0 <= access <= 2 or access in ('None', 'Read', 'ReadWrite'), 'missing/invalid node access')
+    result = node.copy()
+    for field in NULLABLE_FIELDS:
+        result.setdefault(field, None)
+    require(result['rootNodeId'] is None or type(result['rootNodeId']) is int and result['rootNodeId'] > 0, 'invalid node root')
+    return result
+
+
 def nodes(client, **query):
     rows = paged(client, '/nodes', {'fields': FIELDS, 'sort': 'id', 'descending': 'false'} | query)
+    rows = [normalize(row) for row in rows]
+    if 'rootNodeId' in query:
+        require(all(row['rootNodeId'] == query['rootNodeId'] for row in rows), 'node outside requested root')
     ids = [row['id'] for row in rows]
     require(ids == sorted(set(ids)), 'duplicate or unordered node IDs')
     return {row['id']: row for row in rows}
@@ -226,7 +228,7 @@ def membership(edge, node_id, group):
 
 
 def stable(node):
-    return {key: value for key, value in node.items() if key not in ('lastUpdate', 'linkDetails')}
+    return {key: value for key, value in normalize(node).items() if key not in ('lastUpdate', 'linkDetails')}
 
 
 def positive(value):
@@ -236,6 +238,7 @@ def positive(value):
 
 
 def classify(snapshot):
+    snapshot = {node_id: normalize(node) for node_id, node in snapshot.items()}
     require(1 in snapshot and all(i in snapshot for i in range(2, 9)), 'missing Processor context')
     root = snapshot[1]
     require(root['name'] == 'Gangolf' and root['type'] == 'project' and root['ownerId'] == 3
@@ -551,13 +554,13 @@ class Runtime:
         self.restore_binding()
         self.preserve_services()
         self.docker.request('POST', '/containers/' + self.journal.data['api_id'] + '/start')
-        wait_ready(self.inspect(self.journal.data['api_id'])['Image'])
+        wait_ready()
         self.docker.request('POST', '/containers/' + self.journal.data['core_id'] + '/start')
         self.journal.phase('restored')
 
 
-def wait_ready(image):
-    client = LoopbackAPI(image, '')
+def wait_ready():
+    client = LoopbackAPI('')
     for attempt in range(30):
         try:
             client.request('GET', '/i1/readiness')
@@ -576,6 +579,8 @@ def identify(client, owner=None, admin=False):
 
 
 def preflight(docker, config):
+    helper = docker.request('GET', '/images/' + HTTP_HELPER_IMAGE + '/json')
+    require(helper.get('Id') == HTTP_HELPER_IMAGE, 'cached pinned Python HTTP image required')
     api = docker.request('GET', '/containers/' + API_NAME + '/json')
     core = docker.request('GET', '/containers/' + CORE_NAME + '/json')
     for container in (api, core):
@@ -693,7 +698,7 @@ def main():
         journal.phase('pausing')
         runtime.stop(CORE_NAME)
         require(drain_sample(api['Image'], core['State']['StartedAt']) == drain, 'Processor activity raced with shutdown')
-        history_client = LoopbackAPI(api['Image'], env_values(private_bytes(config / 'ai-core.env'))['GANGOLF_API_KEY'])
+        history_client = LoopbackAPI(env_values(private_bytes(config / 'ai-core.env'))['GANGOLF_API_KEY'])
         history = paged(history_client, '/v3/messages', {'descending': 'false'})
         runtime.stop(API_NAME)
         runtime.stopped()
@@ -711,7 +716,7 @@ def main():
         runtime.bind()
         journal.phase('api-starting')
         runtime.start_api()
-        wait_ready(api['Image'])
+        wait_ready()
         after = paged(history_client, '/v3/messages', {'descending': 'false'})
         require(after == history, 'retained v3 history differs')
         migration.verify(False)
