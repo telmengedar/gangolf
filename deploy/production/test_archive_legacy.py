@@ -155,6 +155,36 @@ class ArchiveTests(unittest.TestCase):
             a.Archive(archive.client, self.plan, other).run()
         self.assertEqual(archive.client.posts['nodes'], 1)
 
+    def test_committed_create_temporarily_invisible_then_visible_resumes_once(self):
+        class DelayedGraph(Graph):
+            hidden = False
+
+            def request(self, method, path, body=None, query=None):
+                if method == 'GET' and path == '/nodes' and query and 'name' in query and self.hidden:
+                    self.hidden = False
+                    return {'result': [], 'total': 0, 'continue': None}
+                try:
+                    return super().request(method, path, body, query)
+                except a.Refused:
+                    if method == 'POST' and path == '/nodes':
+                        self.hidden = True
+                    raise
+
+        self.graph = DelayedGraph()
+        self.graph.fault = 'create-after'
+        with self.assertRaises(a.Refused):
+            self.archive().run()
+        self.assertEqual(len(self.graph.nodes), 1)
+        self.assertTrue(json.loads(self.journal.read_bytes())['pending'])
+        self.assertEqual(self.graph.posts['nodes'], 1)
+        self.archive().run()
+        self.assertIsNone(json.loads(self.journal.read_bytes())['pending'])
+        self.assertEqual(self.graph.posts['nodes'], len(self.graph.nodes))
+        self.archive().verify()
+        posts = self.graph.posts.copy()
+        self.assertEqual(self.archive().run()['changes'], {})
+        self.assertEqual(posts, self.graph.posts)
+
     def test_content_link_unknown_results_reconcile(self):
         for fault in ('content-after', 'link-after'):
             with self.subTest(fault=fault):

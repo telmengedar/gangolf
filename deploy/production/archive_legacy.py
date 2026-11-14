@@ -289,6 +289,9 @@ class Archive:
         node = self.names.get(name)
         if node:
             self.check_metadata(node, metadata)
+            if same_json(self.state.get('pending'), metadata):
+                self.state['pending'] = None
+                self.save()
             return node
         if self.state.get('pending'):
             require(self.state['pending'] == metadata, 'unresolved previous creation; resume original plan first')
