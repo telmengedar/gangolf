@@ -331,14 +331,25 @@ class RuntimeChecks(unittest.TestCase):
 
 
 class LoopbackTransportChecks(unittest.TestCase):
-    def test_host_loopback_get_uses_stdin_secret_and_decodes_chunked_response(self):
+    def test_host_loopback_keeps_stdin_open_and_decodes_chunked_response(self):
         calls = []
+        real_popen = subprocess.Popen
+        script = """
+import os,select,sys
+request = os.read(0,4096)
+assert b'Authorization: Bearer synthetic-api-secret\\r\\n' in request
+assert request.startswith(b'GET /api/v3/messages?continue=0 HTTP/1.1')
+ready = select.select([sys.stdin], [], [], 0.05)[0]
+if ready and not os.read(0,1):
+    os.write(1,b'HTTP/1.1 503 Cancelled\\r\\nContent-Length:0\\r\\n\\r\\n')
+else:
+    payload = b'{"result":[],"total":0,"continue":null}'
+    os.write(1,b'HTTP/1.1 200 OK\\r\\nTransfer-Encoding: chunked\\r\\n\\r\\n' + format(len(payload),'x').encode() + b'\\r\\n' + payload + b'\\r\\n0\\r\\n\\r\\n')
+"""
         def fake(command, **kwargs):
             calls.append((command, kwargs))
-            payload = b'{"result":[],"total":0,"continue":null}'
-            response = b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n' + format(len(payload), 'x').encode() + b'\r\n' + payload + b'\r\n0\r\n\r\n'
-            return subprocess.CompletedProcess(command, 0, stdout=response, stderr=b'')
-        with patch.object(m.subprocess, 'run', side_effect=fake):
+            return real_popen([sys.executable, '-c', script], **kwargs)
+        with patch.object(m.subprocess, 'Popen', side_effect=fake):
             result = m.LoopbackAPI('sha256:pinned', 'synthetic-api-secret').request('GET', '/v3/messages', query={'continue': 0})
         self.assertEqual(result['total'], 0)
         command, kwargs = calls[0]
@@ -348,21 +359,25 @@ class LoopbackTransportChecks(unittest.TestCase):
         self.assertIn('-i', command)
         self.assertNotIn('synthetic-api-secret', repr(command))
         self.assertNotIn('env', kwargs)
-        self.assertIn(b'Authorization: Bearer synthetic-api-secret\r\n', kwargs['input'])
-        self.assertTrue(kwargs['input'].startswith(b'GET /api/v3/messages?continue=0 HTTP/1.1'))
+        self.assertEqual(kwargs['stdin'], subprocess.PIPE)
 
     def test_loopback_refuses_post_redirect_and_header_injection(self):
         client = m.LoopbackAPI('sha256:pinned', 'synthetic-api-secret')
-        with patch.object(m.subprocess, 'run') as run:
+        with patch.object(m.subprocess, 'Popen') as run:
             with self.assertRaises(m.Refused):
                 client.request('POST', '/v3/messages', {})
             with self.assertRaises(m.Refused):
                 m.LoopbackAPI('sha256:pinned', 'bad\r\nheader').request('GET', '/v3/messages')
             run.assert_not_called()
-        redirect = subprocess.CompletedProcess([], 0, stdout=b'HTTP/1.1 302 Found\r\nLocation: http://elsewhere\r\nContent-Length: 0\r\n\r\n', stderr=b'')
-        with patch.object(m.subprocess, 'run', return_value=redirect):
+        redirect = b'HTTP/1.1 302 Found\r\nLocation: http://elsewhere\r\nContent-Length: 0\r\n\r\n'
+        with patch.object(m, 'loopback_exchange', return_value=redirect):
             with self.assertRaises(m.Refused):
                 client.request('GET', '/v3/messages')
+
+    def test_deployed_projection_uses_supported_coordinates(self):
+        projection = set(m.FIELDS.split(','))
+        self.assertNotIn('position', projection)
+        self.assertTrue({'x', 'y', 'content', 'linkDetails', 'ownerId', 'created'} <= projection)
 
 
 class RunningEngine(FakeEngine):
@@ -403,6 +418,7 @@ class FullCutoverChecks(unittest.TestCase):
         self.history_failure_at = None
         self.history_calls = 0
         self.drain_race = False
+        self.unknown_stage_create = False
 
     def invoke(self):
         outer = self
@@ -420,7 +436,10 @@ class FullCutoverChecks(unittest.TestCase):
                     node = outer.state.get(query['id'])
                     if node and owner != 1 and node['ownerId'] != owner and node['access'] == 0:
                         return {'result': [], 'total': 0, 'continue': None}
-                return FakeAPI(outer.state, owner).request(method, path, body, query)
+                response = FakeAPI(outer.state, owner).request(method, path, body, query)
+                if outer.unknown_stage_create and owner == 4 and method == 'POST' and path == '/nodes':
+                    raise m.Refused('synthetic response lost after committed root creation')
+                return response
 
         class Loopback:
             def __init__(self, image, token):
@@ -472,6 +491,17 @@ class FullCutoverChecks(unittest.TestCase):
         self.assertTrue(self.engine.state['core']['State']['Running'])
         self.assertTrue(self.engine.state['old']['State']['Running'])
         self.assertEqual(m.strict_json(self.journal_path.read_bytes())['phase'], 'restored')
+
+    def test_unknown_stage_create_keeps_pending_evidence_and_both_writers_stopped(self):
+        self.unknown_stage_create = True
+        with self.assertRaises(m.Refused):
+            self.invoke()
+        journal = m.strict_json(self.journal_path.read_bytes())
+        self.assertEqual(journal['pending'], {'create': 'root'})
+        self.assertEqual(journal['phase'], 'rolled-back')
+        self.assertEqual(len(self.state), len(fixture()) + 1)
+        self.assertFalse(self.engine.state['core']['State']['Running'])
+        self.assertFalse(self.engine.state['old']['State']['Running'])
 
     def test_history_failure_after_api_start_stops_both_without_inverse(self):
         self.history_failure_at = 2

@@ -19,7 +19,7 @@ After both writers stop cleanly, the helper takes a fresh full snapshot and refu
 
 The private journal contains graph snapshots and mutation intent; a separate0600 `.api.env` backup preserves the prior API environment. Neither stores the entered administrator key. Do not print/upload either file, raw Docker inspection/logs, graph payloads or environment files. The preserved original API retains its original environment internally. Retain the journal, backup and stopped original API until Operations has completed acceptance and root authorizes housekeeping.
 
-On a pre-binding failure, the helper attempts exact graph rollback and resumes the prior binding only after preservation verifies. If rollback cannot verify, writers stay stopped for recovery. To recover a known, pre-traffic partial migration:
+On a pre-binding failure, the helper attempts exact graph rollback and resumes the prior binding only after preservation verifies and no unknown creation outcome remains. If rollback cannot verify or creation remains unresolved, writers stay stopped with the pending intent retained for recovery. Stop/readback failures are reported as unverified writer state and require Operations to inspect and stop the journaled writers. To recover a known, pre-traffic partial migration:
 
 ```sh
 python3 ~/.local/share/gangolf-production/migrate_identity.py recover --journal ~/.codex/secrets/gangolf-production-canonical/identity-migration.json

@@ -8,6 +8,7 @@ import http.client
 import io
 import json
 import os
+import selectors
 from pathlib import Path
 import stat
 import subprocess
@@ -21,7 +22,7 @@ import urllib.request
 GROUPS = {'user': 2, 'channel': 3, 'message': 4, 'gangolf-message-batch': 4,
           'gangolf-auth-config': 5, 'gangolf-twitch-config': 5}
 NAMES = {2: 'Users', 3: 'Channels', 4: 'Messages', 5: 'Configuration'}
-FIELDS = 'id,name,type,status,severity,refinement,rootNodeId,ownerId,access,created,content,contentType,skipEmbedding,position,substance,linkDetails'
+FIELDS = 'id,name,type,status,severity,refinement,rootNodeId,ownerId,access,created,content,contentType,skipEmbedding,x,y,substance,linkDetails'
 API_NAME = 'gangolf-production-api'
 CORE_NAME = 'gangolf-production-ai-core'
 
@@ -110,6 +111,43 @@ class HTTP:
             raise Refused('HTTP request failed; mutation outcome may be unknown') from None
 
 
+def loopback_exchange(image, request):
+    require(len(request) <= 4096, 'loopback request exceeds bounded header size')
+    command = ['docker', '--host', 'tcp://gangolf:2375', 'run', '--pull', 'never',
+               '--rm', '-i', '--network', 'host', '--read-only', '--entrypoint', 'nc', image,
+               '-w', '20', '127.0.0.1', '8092']
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    output = bytearray()
+    deadline = time.monotonic() + 30
+    try:
+        process.stdin.write(request)
+        process.stdin.flush()
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            selector.register(process.stderr, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                require(remaining > 0, 'loopback transport timed out')
+                ready = selector.select(remaining)
+                require(ready, 'loopback transport timed out')
+                for key, _ in ready:
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                    elif key.fileobj is process.stdout:
+                        output.extend(chunk)
+                        require(len(output) <= 64 * 1024 * 1024, 'loopback response exceeded limit')
+        require(process.wait(timeout=max(0.01, deadline - time.monotonic())) == 0, 'loopback API transport failed')
+        return bytes(output)
+    finally:
+        process.stdin.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        process.stdout.close()
+        process.stderr.close()
+
+
 class LoopbackAPI:
     def __init__(self, image, token):
         self.image, self.token = image, token
@@ -123,13 +161,10 @@ class LoopbackAPI:
         request = ('GET ' + target + ' HTTP/1.1\r\nHost: 127.0.0.1:8092\r\nConnection: close\r\n'
                    + ('Authorization: Bearer ' + self.token + '\r\n' if self.token else '') + '\r\n').encode()
         try:
-            result = subprocess.run(['docker', '--host', 'tcp://gangolf:2375', 'run', '--pull', 'never',
-                '--rm', '-i', '--network', 'host', '--read-only', '--entrypoint', 'nc', self.image,
-                '-w', '20', '127.0.0.1', '8092'], input=request, capture_output=True, timeout=30, check=False)
-            require(result.returncode == 0 and len(result.stdout) <= 64 * 1024 * 1024, 'loopback API transport failed')
+            wire = loopback_exchange(self.image, request)
             class Socket:
                 def makefile(self, *args, **kwargs):
-                    return io.BytesIO(result.stdout)
+                    return io.BytesIO(wire)
             response = http.client.HTTPResponse(Socket())
             response.begin()
             require(200 <= response.status < 300, 'loopback API request failed')
@@ -432,7 +467,9 @@ class Migration:
                 {'op': 'replace', 'path': '/rootNodeId', 'value': 1},
                 {'op': 'replace', 'path': '/ownerId', 'value': 3}])
         self.verify(True)
-        self.journal.intent(None)
+        pending = data.get('pending') or {}
+        if not set(pending) & {'create', 'createAPI', 'linkContainer'}:
+            self.journal.intent(None)
         self.journal.phase('rolled-back')
 
 
@@ -510,6 +547,7 @@ class Runtime:
         atomic_private(self.config / 'api.env', private_bytes(Path(data['api_env_backup'])))
 
     def resume_old(self):
+        require(not set(self.journal.data.get('pending') or {}) & {'create', 'createAPI', 'linkContainer'}, 'unknown creation outcome requires owner reconciliation before resume')
         self.restore_binding()
         self.preserve_services()
         self.docker.request('POST', '/containers/' + self.journal.data['api_id'] + '/start')
