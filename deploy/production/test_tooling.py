@@ -71,6 +71,23 @@ class ToolingChecks(unittest.TestCase):
         self.assertIn(['docker', 'start', 'gangolf-production-processor'], self.calls)
         self.assertTrue(any('http://127.0.0.1:8093/health' in call for call in self.calls))
 
+    def test_existing_approved_lan_binding_adopted_exactly(self):
+        def approved(metadata):
+            if metadata['HostConfig']['PortBindings']:
+                metadata['HostConfig']['PortBindings'] = {'80/tcp': [{'HostIp': '', 'HostPort': '8091'}]}
+        self.invoke(load('start'), ['--staging'], self.existing(approved, staging=True))
+        self.assertIn(['docker', 'start', 'divoid-processor-alpha'], self.calls)
+
+    def test_changed_lan_binding_rejected(self):
+        for host, port in [('127.0.0.1', '8091'), ('', '9999'), ('0.0.0.0', '8091')]:
+            self.calls = []
+            def changed(metadata):
+                if metadata['HostConfig']['PortBindings']:
+                    metadata['HostConfig']['PortBindings'] = {'80/tcp': [{'HostIp': host, 'HostPort': port}]}
+            with self.subTest(host=host, port=port), self.assertRaisesRegex(SystemExit, 'published port mismatch'):
+                self.invoke(load('start'), ['--staging'], self.existing(changed, staging=True))
+            self.assertNotIn(['docker', 'start', 'divoid-processor-alpha'], self.calls)
+
     def test_wrong_network_denied_before_start(self):
         with self.assertRaises(SystemExit):
             self.invoke(load('start'), [], self.existing(lambda m: m['HostConfig'].update(NetworkMode='wrong-network')))

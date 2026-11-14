@@ -18,7 +18,7 @@
       "divoid-processor-alpha-data:/data"
     ],
     "ports": [
-      "127.0.0.1:8091:80"
+      ":8091:80"
     ],
     "health": "http://127.0.0.1:8091/api/health"
   },
