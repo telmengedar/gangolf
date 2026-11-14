@@ -1,0 +1,7 @@
+[Unit]
+Description=Gangolf production off-host logical backup
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.codex/secrets/gangolf-production/backup.env
+ExecStart=/usr/bin/python3 %h/.local/share/gangolf-production/backup.py
+UMask=0077

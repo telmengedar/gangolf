@@ -1,0 +1,53 @@
+[
+  {
+    "name": "divoid-processor-alpha-pg",
+    "image": "sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d",
+    "env": "postgres.env",
+    "network": "divoid-processor-alpha-net",
+    "mounts": [
+      "divoid-processor-alpha-pgdata:/var/lib/postgresql/data"
+    ],
+    "health": "postgres"
+  },
+  {
+    "name": "divoid-processor-alpha",
+    "image": "sha256:6c0dadc2c082980e44a791bbc354a6ce41a59df3b893b4fada38ae1b6a908eb1",
+    "env": "divoid.env",
+    "network": "divoid-processor-alpha-net",
+    "mounts": [
+      "divoid-processor-alpha-data:/data"
+    ],
+    "ports": [
+      "127.0.0.1:8091:80"
+    ],
+    "health": "http://127.0.0.1:8091/api/health"
+  },
+  {
+    "name": "gangolf-production-processor",
+    "image": "sha256:c41148067fa6a00c7f7a6b80fe06073964a64e3883167fbb5f1ef411604818f5",
+    "env": "processor.env",
+    "network": "host",
+    "mounts": [
+      "processor-workspace:/data/workspace"
+    ],
+    "health": "http://127.0.0.1:8080/health"
+  },
+  {
+    "name": "gangolf-production-api",
+    "image_env": "GANGOLF_API_IMAGE",
+    "env": "api.env",
+    "network": "host",
+    "mounts": [
+      "gangolf-production-twitch-secrets:/run/gangolf-credentials:ro"
+    ],
+    "health": "http://127.0.0.1:8092/api/i1/readiness"
+  },
+  {
+    "name": "gangolf-production-ai-core",
+    "image_env": "GANGOLF_AI_CORE_IMAGE",
+    "env": "ai-core.env",
+    "network": "host",
+    "mounts": [],
+    "responder": true
+  }
+]
