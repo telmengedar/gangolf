@@ -23,14 +23,18 @@
     "health": "http://127.0.0.1:8091/api/health"
   },
   {
-    "name": "gangolf-production-processor",
+    "name": "processor",
     "image": "sha256:c41148067fa6a00c7f7a6b80fe06073964a64e3883167fbb5f1ef411604818f5",
     "env": "processor.env",
     "network": "host",
     "mounts": [
-      "processor-workspace:/data/workspace"
+      "gangolf-production-processor-workspace:/data/workspace"
     ],
-    "health": "http://127.0.0.1:8080/health"
+    "health": "http://127.0.0.1:8080/health",
+    "staging": {
+      "name": "gangolf-production-processor",
+      "health": "http://127.0.0.1:8093/health"
+    }
   },
   {
     "name": "gangolf-production-api",

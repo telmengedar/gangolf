@@ -20,6 +20,7 @@ def protected(path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--responder', action='store_true')
+    parser.add_argument('--staging', action='store_true')
     args = parser.parse_args()
     if args.responder and os.environ.get('GANGOLF_PREVIOUS_RESPONDER_STOPPED') != 'yes':
         raise SystemExit('observe previous responder stopped; set GANGOLF_PREVIOUS_RESPONDER_STOPPED=yes')
@@ -29,6 +30,8 @@ def main():
         raise SystemExit('GANGOLF_API_IMAGE must be an immutable sha256 image ID')
     services = json.loads(Path(__file__).with_name('stack.json').read_text())
     for service in services:
+        if args.staging:
+            service = service | service.get('staging', {})
         if service.get('responder') and not args.responder:
             continue
         image = service.get('image') or os.environ[service['image_env']]
@@ -47,6 +50,15 @@ def main():
                 raise SystemExit(f"image mismatch for {service['name']}; operations must reconcile preserved container")
             if metadata['HostConfig']['RestartPolicy']['Name'] != 'unless-stopped':
                 raise SystemExit(f"restart policy mismatch for {service['name']}")
+            if metadata['HostConfig']['NetworkMode'] != service['network']:
+                raise SystemExit(f"network mismatch for {service['name']}")
+            expected_ports = {}
+            for port in service.get('ports', []):
+                host, published, target = port.rsplit(':', 2)
+                expected_ports.setdefault(target + '/tcp', []).append((host, published))
+            actual_ports = {target: sorted((binding['HostIp'], binding['HostPort']) for binding in bindings) for target, bindings in (metadata['HostConfig'].get('PortBindings') or {}).items() if bindings}
+            if actual_ports != {target: sorted(bindings) for target, bindings in expected_ports.items()}:
+                raise SystemExit(f"published port mismatch for {service['name']}")
             mounted = {m['Name'] + ':' + m['Destination'] + (':ro' if not m['RW'] else '') for m in metadata['Mounts'] if m['Type'] == 'volume'}
             if not set(service['mounts']).issubset(mounted):
                 raise SystemExit(f"volume mismatch for {service['name']}")

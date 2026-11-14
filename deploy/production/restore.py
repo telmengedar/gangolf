@@ -16,7 +16,10 @@ def main():
     if not args.name.startswith('gangolf-restore-') or not all(c.isalnum() or c == '-' for c in args.name):
         raise SystemExit('isolated name must start gangolf-restore- and contain letters/digits/hyphens')
     manifest = json.loads((args.backup / 'manifest.json').read_text())
-    for name, expected in manifest['sha256'].items():
+    checksums = manifest.get('sha256')
+    if not isinstance(checksums, dict) or not {'globals.sql', 'divoid.dump'}.issubset(checksums):
+        raise SystemExit('backup missing required checksum coverage')
+    for name, expected in checksums.items():
         if Path(name).name != name or hashlib.sha256((args.backup / name).read_bytes()).hexdigest() != expected:
             raise SystemExit('backup checksum mismatch')
     image = 'sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d'
