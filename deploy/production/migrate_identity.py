@@ -502,6 +502,8 @@ class Runtime:
         if data.get('replacement'):
             self.stop(API_NAME)
             self.docker.request('DELETE', '/containers/' + data['replacement'])
+            data.pop('replacement')
+            self.journal.save()
         old = self.inspect(data['api_id'])
         if old['Name'] != '/' + API_NAME:
             self.docker.request('POST', '/containers/' + old['Id'] + '/rename', query={'name': API_NAME})
@@ -687,19 +689,41 @@ def main():
         if phase == 'prepared':
             raise Refused('pre-pause verification failed; existing service remains online') from None
         if phase in ('api-starting', 'resuming', 'resumed'):
+            for writer in (journal.data['core_id'], journal.data['replacement']):
+                try:
+                    runtime.stop(writer)
+                except BaseException:
+                    pass
+            journal.phase('traffic-reconciliation-required')
             try:
-                runtime.stop(CORE_NAME)
-                runtime.stop(API_NAME)
-            finally:
-                journal.phase('traffic-reconciliation-required')
-            raise Refused('writers stopped; API may have accepted traffic; explicit owner reconciliation required') from None
+                runtime.stopped()
+            except BaseException:
+                raise Refused('API may have accepted traffic; writer state unverified; owner must stop and reconcile') from None
+            raise Refused('both writers verified stopped; API may have accepted traffic; explicit owner reconciliation required') from None
         try:
+            clean = True
+            for writer in (journal.data['core_id'], journal.data.get('replacement') or journal.data['api_id']):
+                try:
+                    runtime.stop(writer)
+                except BaseException:
+                    clean = False
             runtime.stopped()
+            require(clean, 'writer shutdown requires reconciliation')
             if journal.data.get('app'):
                 migration.rollback()
             runtime.resume_old()
         except BaseException:
-            raise Refused('cutover incomplete; keep writers stopped and recover with the private journal') from None
+            for writer in (journal.data['core_id'], journal.data['api_id'], journal.data.get('replacement')):
+                if writer:
+                    try:
+                        runtime.stop(writer)
+                    except BaseException:
+                        pass
+            try:
+                runtime.stopped()
+            except BaseException:
+                raise Refused('cutover incomplete; writer state unverified; inspect and stop journaled writers before recovery') from None
+            raise Refused('cutover incomplete; both writers verified stopped; recover with the private journal') from None
         raise Refused('cutover failed; rollback verified and previous binding resumed') from None
 
 

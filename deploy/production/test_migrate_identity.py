@@ -1,4 +1,7 @@
 import copy
+import contextlib
+import io
+import sys
 import importlib.util
 import json
 import os
@@ -360,6 +363,124 @@ class LoopbackTransportChecks(unittest.TestCase):
         with patch.object(m.subprocess, 'run', return_value=redirect):
             with self.assertRaises(m.Refused):
                 client.request('GET', '/v3/messages')
+
+
+class RunningEngine(FakeEngine):
+    def __init__(self, environment):
+        super().__init__(environment)
+        self.state['old']['State']['Running'] = True
+        self.state['old']['Mounts'] = [{'Name': 'gangolf-production-twitch-secrets', 'RW': False, 'Destination': '/run/gangolf-credentials'}]
+        self.state['core'].update(Name='/' + m.CORE_NAME, Image='sha256:core', Config={'Env': []},
+            HostConfig={'NetworkMode': 'host', 'RestartPolicy': {'Name': 'unless-stopped'}})
+        self.state['core']['State'].update(Running=True, StartedAt='2026-11-14T00:00:00Z')
+        for name in ('processor', 'divoid-processor-alpha'):
+            self.state[name] = {'Id': name, 'Name': '/' + name, 'State': {'Running': True}}
+
+    def request(self, method, path, body=None, query=None):
+        if method == 'GET' and path == '/containers/json':
+            return [{'Id': 'core', 'State': 'running', 'ImageID': 'sha256:core'}]
+        return super().request(method, path, body, query)
+
+
+class FullCutoverChecks(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
+        self.home.chmod(0o700)
+        config = self.home / '.codex/secrets/gangolf-production-canonical'
+        config.mkdir(parents=True, mode=0o700)
+        environment = {'GANGOLF_DIVOID_TOKEN': 'old-secret', 'GANGOLF_DIVOID_ROOT_ID': '1',
+                       'GANGOLF_DIVOID_MESSAGES_ID': '4', 'GANGOLF_DIVOID_CONFIG_ID': '44'}
+        for path, value in ((config / 'api.env', ''.join(k + '=' + v + '\n' for k, v in environment.items())),
+                            (config / 'ai-core.env', 'GANGOLF_API_KEY=client-secret\n'),
+                            (config.parent / '.gangolf-divoid-gangolf', 'UserId=4\nKey=new-secret\n')):
+            path.write_text(value)
+            path.chmod(0o600)
+        self.engine = RunningEngine(environment)
+        self.state = fixture()
+        self.journal_path = self.home / 'journal'
+        self.history_failure_at = None
+        self.history_calls = 0
+        self.drain_race = False
+
+    def invoke(self):
+        outer = self
+        class Client:
+            def __init__(self, base, token):
+                self.base, self.token = base, token
+
+            def request(self, method, path, body=None, query=None):
+                if self.base == 'http://gangolf:2375':
+                    return outer.engine.request(method, path, body, query)
+                owner = {'new-secret': 4, 'admin-secret': 1, 'old-secret': 3}[self.token]
+                if path == '/users/me':
+                    return {'id': owner, 'enabled': True, 'permissions': ['admin'] if owner == 1 else ['read', 'write']}
+                if method == 'GET' and path == '/nodes' and query and 'id' in query:
+                    node = outer.state.get(query['id'])
+                    if node and owner != 1 and node['ownerId'] != owner and node['access'] == 0:
+                        return {'result': [], 'total': 0, 'continue': None}
+                return FakeAPI(outer.state, owner).request(method, path, body, query)
+
+        class Loopback:
+            def __init__(self, image, token):
+                pass
+
+            def request(self, method, path, body=None, query=None):
+                if path == '/i1/readiness':
+                    return {'status': 'ready'}
+                outer.history_calls += 1
+                if outer.history_calls == outer.history_failure_at:
+                    raise m.Refused('synthetic history failure')
+                return {'result': [{'id': '65'}], 'total': 1, 'continue': None}
+
+        def drain(*args):
+            if self.drain_race and not self.engine.state['core']['State']['Running']:
+                raise m.Refused('synthetic run race after core stop')
+            return (0, 0)
+
+        with contextlib.ExitStack() as stack:
+            for patcher in (patch.object(m, 'HTTP', Client), patch.object(m, 'LoopbackAPI', Loopback),
+                patch.object(m.Path, 'home', return_value=self.home), patch.object(m.getpass, 'getpass', return_value='admin-secret'),
+                patch.object(m.sys.stdin, 'isatty', return_value=True), patch.object(m.sys.stderr, 'isatty', return_value=True),
+                patch('builtins.input', return_value='QUIESCENT'), patch.object(m, 'drain_sample', side_effect=drain),
+                patch.object(m.time, 'sleep'), patch.object(sys, 'argv', ['migrate_identity.py', 'apply', '--journal', str(self.journal_path)]),
+                patch.dict(os.environ, DOCKER_HOST='tcp://gangolf:2375'), contextlib.redirect_stdout(io.StringIO())):
+                stack.enter_context(patcher)
+            m.main()
+
+    def test_full_fake_cutover_reaches_resumed_without_persisting_admin(self):
+        self.invoke()
+        self.assertEqual(m.strict_json(self.journal_path.read_bytes())['phase'], 'resumed')
+        self.assertTrue(self.engine.state['core']['State']['Running'])
+        self.assertTrue(self.engine.state['replacement']['State']['Running'])
+        self.assertNotIn('admin-secret', self.journal_path.read_text())
+
+    def test_history_failure_after_core_stop_restores_both_previous_writers(self):
+        self.history_failure_at = 1
+        with self.assertRaises(m.Refused):
+            self.invoke()
+        self.assertTrue(self.engine.state['core']['State']['Running'])
+        self.assertTrue(self.engine.state['old']['State']['Running'])
+        self.assertEqual(self.state, fixture())
+        self.assertEqual(m.strict_json(self.journal_path.read_bytes())['phase'], 'restored')
+
+    def test_quiet_race_after_core_stop_restores_both_previous_writers(self):
+        self.drain_race = True
+        with self.assertRaises(m.Refused):
+            self.invoke()
+        self.assertTrue(self.engine.state['core']['State']['Running'])
+        self.assertTrue(self.engine.state['old']['State']['Running'])
+        self.assertEqual(m.strict_json(self.journal_path.read_bytes())['phase'], 'restored')
+
+    def test_history_failure_after_api_start_stops_both_without_inverse(self):
+        self.history_failure_at = 2
+        with self.assertRaises(m.Refused):
+            self.invoke()
+        self.assertFalse(self.engine.state['core']['State']['Running'])
+        self.assertFalse(self.engine.state['replacement']['State']['Running'])
+        self.assertEqual(m.strict_json(self.journal_path.read_bytes())['phase'], 'traffic-reconciliation-required')
+        self.assertEqual(self.state[65]['ownerId'], 4)
 
 
 if __name__ == '__main__':
