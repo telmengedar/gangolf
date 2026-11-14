@@ -1,0 +1,584 @@
+import copy
+import contextlib
+import io
+import sys
+import importlib.util
+import json
+import os
+from pathlib import Path
+import tempfile
+import subprocess
+from unittest.mock import patch
+import unittest
+
+SPEC = importlib.util.spec_from_file_location('migration', Path(__file__).with_name('migrate_identity.py'))
+m = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(m)
+
+
+def edge(source, target, kind='None', context=None):
+    return {'sourceId': source, 'targetId': target, 'linkType': kind, 'context': context}
+
+
+def fixture():
+    result = {}
+    def node(node_id, kind, name, payload=None):
+        result[node_id] = dict(id=node_id, type=kind, name=name, ownerId=3, rootNodeId=1,
+                               access=0, skipEmbedding=True, created='2026-11-14T00:00:00Z', x=0, y=0, contentType='application/json',
+                               content=None if payload is None else json.dumps(payload), linkDetails=[])
+    node(1, 'project', 'Gangolf')
+    result[1]['rootNodeId'] = None
+    for group, name in m.NAMES.items():
+        node(group, None, name)
+    node(6, 'processor-config', 'chat')
+    node(7, 'processor-config', 'memory')
+    node(8, 'agent', 'Gangolf')
+    node(42, 'user', 'gangolf-user:WyJUd2l0Y2giLCIxIl0', {'schemaVersion': 1, 'service': 'Twitch', 'serviceId': '1'})
+    node(43, 'channel', 'gangolf-channel:WyJUd2l0Y2giLCIyIl0', {'schemaVersion': 1, 'service': 'Twitch', 'channel': '2'})
+    node(44, 'gangolf-auth-config', 'auth', {'schemaVersion': 1, 'users': {'42': {}}})
+    node(45, 'gangolf-twitch-config', 'profile', {'schemaVersion': 2, 'authConfigId': '44', 'tenantUserId': '42', 'channelId': '43'})
+    node(65, 'message', 'message', {'schemaVersion': 1, 'userId': '42', 'channelId': '43', 'time': '2026-11-14T00:00:00Z'})
+    node(49, 'session-log', 'Processor archive')
+    result[49]['access'] = 'Read, Write'
+    relations = [edge(i, 1) for i in range(2, 6)] + [edge(6, 5), edge(7, 5), edge(49, 8)]
+    relations += [edge(i, m.GROUPS[result[i]['type']]) for i in (42, 43, 44, 45, 65)]
+    relations += [edge(45, 44, 'Unidirectional', 'uses-auth-config'), edge(45, 43, 'Unidirectional', 'configured-for'),
+                  edge(65, 42, 'Unidirectional', 'authored-by'), edge(65, 43, 'Unidirectional', 'in-channel')]
+    for relation in relations:
+        for node_id in (relation['sourceId'], relation['targetId']):
+            result[node_id]['linkDetails'].append(copy.deepcopy(relation))
+    return result
+
+
+class FakeAPI:
+    def __init__(self, state, owner=1):
+        self.state, self.owner = state, owner
+        self.calls = []
+        self.failure = None
+
+    def request(self, method, path, body=None, query=None):
+        self.calls.append((method, path, copy.deepcopy(body), query))
+        query = query or {}
+        if method == 'GET' and path == '/nodes':
+            selected = [copy.deepcopy(n) for n in self.state.values()
+                        if ('rootNodeId' not in query or n.get('rootNodeId') == query['rootNodeId'])
+                        and ('id' not in query or n['id'] == query['id'])]
+            selected.sort(key=lambda n: n['id'])
+            start, count = query.get('continue', 0), min(query.get('count', 500), 3)
+            end = min(start + count, len(selected))
+            return {'result': selected[start:end], 'total': len(selected), 'continue': end if end < len(selected) else None}
+        if method == 'POST' and path == '/nodes':
+            node_id = max(self.state) + 1
+            self.state[node_id] = dict(id=node_id, type=None, rootNodeId=None, ownerId=self.owner,
+                access=0, content=None, contentType=None, created='2026-11-14T00:00:00Z', x=0, y=0, linkDetails=[], **{k: v for k, v in body.items() if k not in ('type', 'rootNodeId', 'access')})
+            self.state[node_id].update(body)
+            response = copy.deepcopy(self.state[node_id])
+        else:
+            parts = path.split('/')
+            node_id = int(parts[2])
+            if method == 'PATCH':
+                for operation in body:
+                    self.state[node_id][operation['path'][1:]] = operation['value']
+                response = None
+            elif method == 'POST' and parts[3] == 'links':
+                relation = edge(node_id, body, query.get('linkType', 'None'))
+                for endpoint in (node_id, body):
+                    if relation not in self.state[endpoint]['linkDetails']:
+                        self.state[endpoint]['linkDetails'].append(relation)
+                response = None
+            elif method == 'DELETE':
+                other = int(parts[4])
+                for endpoint in (node_id, other):
+                    self.state[endpoint]['linkDetails'] = [e for e in self.state[endpoint]['linkDetails'] if set((e['sourceId'], e['targetId'])) != {node_id, other}]
+                response = None
+            else:
+                raise AssertionError((method, path))
+        if self.failure and self.failure(method, path):
+            self.failure = None
+            raise m.Refused('synthetic unknown response after mutation')
+        return response
+
+
+class MigrationChecks(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+        self.directory.chmod(0o700)
+        self.original = fixture()
+        self.state = copy.deepcopy(self.original)
+        self.admin, self.target = FakeAPI(self.state), FakeAPI(self.state, 4)
+        self.journal = m.Journal(self.directory / 'journal', {'phase': 'paused', 'snapshot': self.original,
+                                  'app': m.classify(self.original)})
+        self.migration = m.Migration(self.admin, self.target, self.journal)
+
+    def assert_original(self):
+        self.migration.verify(True)
+        for node_id, node in self.original.items():
+            self.assertEqual(m.stable(self.state[node_id]), m.stable(node))
+            self.assertEqual(m.edges(self.state[node_id]), m.edges(node))
+
+    def test_complete_move_keeps_ids_content_semantics_and_processor(self):
+        self.migration.stage()
+        self.migration.move()
+        self.migration.verify(False)
+        for node_id in (42, 43, 44, 45, 65):
+            self.assertEqual(self.state[node_id]['content'], self.original[node_id]['content'])
+            self.assertEqual(self.state[node_id]['ownerId'], 4)
+        self.assertEqual(self.state[49], self.original[49])
+        self.migration.rollback()
+        self.assert_original()
+
+    def test_partial_patch_response_lost_restores_exact_graph(self):
+        self.migration.stage()
+        self.admin.failure = lambda method, path: method == 'PATCH'
+        with self.assertRaises(m.Refused):
+            self.migration.move()
+        self.migration.rollback()
+        self.assert_original()
+
+    def test_membership_response_lost_restores_both_projections(self):
+        self.migration.stage()
+        self.admin.failure = lambda method, path: method == 'DELETE'
+        with self.assertRaises(m.Refused):
+            self.migration.move()
+        self.migration.rollback()
+        self.assert_original()
+
+    def test_unknown_create_is_never_retried(self):
+        self.target.failure = lambda method, path: method == 'POST' and path == '/nodes'
+        with self.assertRaises(m.Refused):
+            self.migration.stage()
+        self.assertEqual(self.journal.data['pending'], {'create': 'root'})
+        self.assertEqual(len(self.state), len(self.original) + 1)
+        with self.assertRaises(m.Refused):
+            self.migration.stage()
+        self.assertEqual(len(self.state), len(self.original) + 1)
+        self.assert_original()
+
+    def test_staging_missing_membership_is_preserved(self):
+        staged = copy.deepcopy(self.original[65])
+        staged.update(id=66, content=None, linkDetails=[])
+        self.state[66] = staged
+        self.original[66] = copy.deepcopy(staged)
+        self.journal.data['snapshot'] = self.original
+        self.journal.data['app'] = m.classify(self.original)
+        self.migration.stage()
+        self.migration.move()
+        self.assertEqual(self.state[66]['linkDetails'], [])
+        self.migration.rollback()
+        self.assert_original()
+
+    def test_omitted_nullable_metadata_normalizes_without_masking_missing_critical_fields(self):
+        projected = copy.deepcopy(self.original)
+        for node in projected.values():
+            for field in m.NULLABLE_FIELDS:
+                if node.get(field) is None:
+                    node.pop(field, None)
+        snapshot = m.nodes(FakeAPI(projected), rootNodeId=1)
+        snapshot.update(m.nodes(FakeAPI(projected), id=1))
+        self.assertIsNone(snapshot[2]['type'])
+        self.assertEqual(set(m.classify(snapshot)), {42, 43, 44, 45, 65})
+        for critical in ('id', 'ownerId', 'access'):
+            invalid = copy.deepcopy(self.original[42])
+            invalid.pop(critical)
+            with self.assertRaises(m.Refused):
+                m.normalize(invalid)
+        invalid = copy.deepcopy(self.original[42])
+        invalid.pop('rootNodeId')
+        projected[42] = invalid
+        with self.assertRaises(m.Refused):
+            m.classify(projected)
+
+    def test_declared_access_flags_and_masks_preserve_raw_archive_evidence(self):
+        for wire, expected in [('None', 0), ('Read', 1), ('Write', 2), ('Read, Write', 3),
+                               (' Write , Read ', 3), (0, 0), (1, 1), (2, 2), (3, 3)]:
+            with self.subTest(wire=wire):
+                self.assertEqual(m.access_mask(wire), expected)
+        for wire in (None, False, True, -1, 4, 8, 'ReadWrite', '3', 'Read, None', 'Read,,Write',
+                     'Execute', 'Read, Read', [], {}):
+            with self.subTest(invalid=wire):
+                with self.assertRaises(m.Refused):
+                    m.access_mask(wire)
+        snapshot = m.nodes(self.admin, rootNodeId=1)
+        snapshot.update(m.nodes(self.admin, id=1))
+        self.assertEqual(snapshot[49]['access'], 'Read, Write')
+        self.assertEqual(m.stable(snapshot[49])['access'], 3)
+        self.assertEqual(set(m.classify(snapshot)), {42, 43, 44, 45, 65})
+        self.assertEqual(m.access_mask(snapshot[44]['access']), 0)
+
+    def test_requested_boolean_coordinates_timestamp_and_adjacency_remain_required(self):
+        for field in ('access', 'skipEmbedding', 'x', 'y', 'created', 'linkDetails'):
+            missing = copy.deepcopy(self.original[42])
+            missing.pop(field)
+            with self.subTest(missing=field), self.assertRaises(m.Refused):
+                m.normalize(missing)
+        for field, value in [('x', True), ('x', float('inf')), ('y', float('nan')), ('skipEmbedding', None)]:
+            invalid = copy.deepcopy(self.original[42])
+            invalid[field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(m.Refused):
+                m.normalize(invalid)
+        valid = copy.deepcopy(self.original[42])
+        valid.update(skipEmbedding=False, x=0, y=0.0, linkDetails=[])
+        normalized = m.normalize(valid)
+        self.assertIs(normalized['skipEmbedding'], False)
+        self.assertEqual((normalized['x'], normalized['y'], normalized['linkDetails']), (0, 0.0, []))
+
+    def test_unknown_cross_boundary_edge_refused_before_writes(self):
+        relation = edge(65, 8, 'Unidirectional', 'replies-to')
+        self.original[65]['linkDetails'].append(relation)
+        self.original[8]['linkDetails'].append(relation)
+        with self.assertRaises(m.Refused):
+            m.classify(self.original)
+        self.assertEqual(self.admin.calls, [])
+
+    def test_payload_reference_outside_closed_set_refused(self):
+        self.original[65]['content'] = json.dumps({'schemaVersion': 1, 'userId': '8', 'channelId': '43'})
+        with self.assertRaises(m.Refused):
+            m.classify(self.original)
+
+    def test_rollback_refuses_changed_content_and_post_resume_state(self):
+        self.migration.stage()
+        self.migration.move()
+        self.state[65]['content'] = '{}'
+        with self.assertRaises(m.Refused):
+            self.migration.rollback()
+        self.journal.data['phase'] = 'resumed'
+        with self.assertRaises(m.Refused):
+            self.migration.rollback()
+
+    def test_private_journal_rejects_unsafe_modes_and_symlink(self):
+        path = self.directory / 'journal'
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        path.chmod(0o644)
+        with self.assertRaises(m.Refused):
+            m.Journal(path)
+        link = self.directory / 'symlink'
+        link.symlink_to(path)
+        with self.assertRaises(OSError):
+            m.private_bytes(link)
+
+    def test_duplicate_json_and_nonprogressing_pagination_refused(self):
+        with self.assertRaises(m.Refused):
+            m.strict_json('{"id":1,"id":2}')
+        class Broken:
+            def request(self, *args, **kwargs):
+                return {'result': [], 'total': 1, 'continue': 0}
+        with self.assertRaises(m.Refused):
+            m.paged(Broken(), '/nodes', {})
+
+    def test_unknown_outgoing_fate_refused_without_state_rewrite(self):
+        app = {65: copy.deepcopy(self.original[65])}
+        app[65]['content'] = json.dumps({'schemaVersion': 4, 'delivery': {'state': 'unknown'}})
+        before = copy.deepcopy(app)
+        with self.assertRaises(m.Refused):
+            m.no_pending_intents(app)
+        self.assertEqual(app, before)
+        for state in ('sent', 'submitted', 'failed'):
+            app[65]['content'] = json.dumps({'schemaVersion': 3, 'delivery': {'state': state}})
+            m.no_pending_intents(app)
+
+
+class FakeEngine:
+    def __init__(self, environment):
+        self.calls = []
+        self.state = {
+            'old': {'Id': 'old', 'Name': '/' + m.API_NAME, 'Image': 'sha256:pinned',
+                    'Config': {'Hostname': 'oldhost', 'Image': 'image-tag', 'Env': [k + '=' + v for k, v in environment.items()],
+                               'User': '10001', 'Cmd': ['/gangolf-api'], 'Labels': {'keep': 'yes'}},
+                    'HostConfig': {'NetworkMode': 'host', 'RestartPolicy': {'Name': 'unless-stopped'}, 'Binds': ['secret:/run/secrets:ro']},
+                    'State': {'Running': False, 'ExitCode': 0}},
+            'core': {'Id': 'core', 'State': {'Running': False, 'ExitCode': 0}}}
+        self.fail_create = False
+
+    def request(self, method, path, body=None, query=None):
+        self.calls.append((method, path, copy.deepcopy(body), query))
+        if path == '/containers/create':
+            self.state['replacement'] = {'Id': 'replacement', 'Name': '/' + m.API_NAME, 'Image': body['Image'],
+                'Config': {k: v for k, v in body.items() if k != 'HostConfig'}, 'HostConfig': body['HostConfig'],
+                'State': {'Running': False, 'ExitCode': 0}}
+            if self.fail_create:
+                raise m.Refused('synthetic API create response lost')
+            return {'Id': 'replacement'}
+        parts = path.split('/')
+        container = next(c for c in self.state.values() if c['Id'] == parts[2] or c.get('Name') == '/' + parts[2])
+        if method == 'GET':
+            return copy.deepcopy(container)
+        if parts[-1] == 'rename':
+            container['Name'] = '/' + query['name']
+        elif method == 'DELETE':
+            del self.state[container['Id']]
+        elif parts[-1] == 'stop':
+            container['State']['Running'] = False
+        elif parts[-1] == 'start':
+            container['State']['Running'] = True
+        else:
+            raise AssertionError(path)
+
+
+class RuntimeChecks(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+        self.directory.chmod(0o700)
+        self.env = {'GANGOLF_DIVOID_TOKEN': 'synthetic-old-secret', 'GANGOLF_DIVOID_ROOT_ID': '1',
+                    'GANGOLF_DIVOID_MESSAGES_ID': '4', 'GANGOLF_DIVOID_CONFIG_ID': '44',
+                    'API_PEPPER': 'synthetic-keep-pepper', 'OTHER': 'keep'}
+        self.raw = ''.join(k + '=' + v + '\n' for k, v in self.env.items()).encode()
+        backup = self.directory / 'backup.env'
+        m.atomic_private(backup, self.raw)
+        m.atomic_private(self.directory / 'api.env', self.raw)
+        self.journal = m.Journal(self.directory / 'journal', {'phase': 'moved', 'api_id': 'old',
+            'core_id': 'core', 'api_env_backup': str(backup), 'rollback_name': 'old-preserved',
+            'containers': {'root': 100, '4': 103}})
+        self.engine = FakeEngine(self.env)
+        self.runtime = m.Runtime(self.directory, self.journal, self.engine, 'synthetic-new-secret')
+
+    def test_binding_changes_exact_three_env_fields_and_preserves_stopped_old(self):
+        self.runtime.bind()
+        old = self.engine.state['old']
+        new = self.engine.state['replacement']
+        self.assertFalse(old['State']['Running'])
+        self.assertEqual(old['Name'], '/old-preserved')
+        actual = dict(entry.split('=', 1) for entry in new['Config']['Env'])
+        changed = {k for k in self.env if self.env[k] != actual[k]}
+        self.assertEqual(changed, {'GANGOLF_DIVOID_TOKEN', 'GANGOLF_DIVOID_ROOT_ID', 'GANGOLF_DIVOID_MESSAGES_ID'})
+        self.assertEqual(new['HostConfig'], old['HostConfig'])
+        self.assertEqual(new['Image'], old['Image'])
+        self.assertEqual(new['Config']['User'], '10001')
+        self.assertNotIn('synthetic-', self.journal.path.read_text())
+        self.runtime.restore_binding()
+        self.assertEqual((self.directory / 'api.env').read_bytes(), self.raw)
+        self.assertEqual(self.engine.state['old']['Name'], '/' + m.API_NAME)
+        self.assertNotIn('replacement', self.engine.state)
+
+    def test_unknown_api_creation_retains_stopped_old_and_pending_journal(self):
+        self.engine.fail_create = True
+        with self.assertRaises(m.Refused):
+            self.runtime.bind()
+        self.assertEqual(self.journal.data['pending'], {'createAPI': True})
+        self.assertFalse(self.engine.state['old']['State']['Running'])
+        self.assertFalse(self.engine.state['replacement']['State']['Running'])
+        self.assertNotIn('replacement', self.journal.data)
+        self.assertFalse(any(call[1].endswith('/start') for call in self.engine.calls))
+
+    def test_running_writer_refuses_binding_before_env_or_docker_mutation(self):
+        self.engine.state['core']['State']['Running'] = True
+        with self.assertRaises(m.Refused):
+            self.runtime.bind()
+        self.assertEqual((self.directory / 'api.env').read_bytes(), self.raw)
+        self.assertTrue(all(call[0] == 'GET' for call in self.engine.calls))
+
+    def test_drain_counts_stderr_and_rejects_established_processor_socket(self):
+        def result(command, **kwargs):
+            if 'logs' in command:
+                return subprocess.CompletedProcess(command, 0, stdout=b'', stderr=b'msg="run started"\n')
+            return subprocess.CompletedProcess(command, 0, stdout=b'', stderr=b'')
+        with patch.object(m.subprocess, 'run', side_effect=result):
+            with self.assertRaises(m.Refused):
+                m.drain_sample('sha256:pinned', '2026-11-14T00:00:00Z')
+        def busy(command, **kwargs):
+            output = b'' if 'logs' in command else b'tcp 0 0 127.0.0.1:8080 127.0.0.1:12345 ESTABLISHED\n'
+            return subprocess.CompletedProcess(command, 0, stdout=output, stderr=b'')
+        with patch.object(m.subprocess, 'run', side_effect=busy):
+            with self.assertRaises(m.Refused):
+                m.drain_sample('sha256:pinned', '2026-11-14T00:00:00Z')
+
+
+class LoopbackTransportChecks(unittest.TestCase):
+    def test_pinned_python_get_uses_json_stdin_and_stdlib_http(self):
+        calls = []
+        real_run = subprocess.run
+        fixture_code = r"""
+import urllib.request
+class Response:
+    status=200
+    def __enter__(self): return self
+    def __exit__(self,*args): pass
+    def read(self,limit):
+        assert limit==64*1024*1024+1
+        return b'{"result":[],"total":0,"continue":null}'
+class Opener:
+    def open(self,request,timeout):
+        assert request.full_url=='http://127.0.0.1:8092/api/v3/messages?continue=0'
+        assert request.get_header('Authorization')=='Bearer synthetic-api-secret'
+        assert request.method=='GET' and timeout==20
+        return Response()
+def opener(*handlers):
+    assert any(isinstance(h,urllib.request.ProxyHandler) and h.proxies=={} for h in handlers)
+    assert any(h.__class__.__name__=='NoRedirect' for h in handlers)
+    return Opener()
+urllib.request.build_opener=opener
+"""
+        def fake(command, **kwargs):
+            calls.append((command, kwargs))
+            return real_run([sys.executable, '-c', fixture_code + command[-1]], **kwargs)
+        with patch.object(m.subprocess, 'run', side_effect=fake):
+            result = m.LoopbackAPI('synthetic-api-secret').request('GET', '/v3/messages', query={'continue': 0})
+        self.assertEqual(result['total'], 0)
+        command, kwargs = calls[0]
+        self.assertIn(m.HTTP_HELPER_IMAGE, command)
+        self.assertIn('never', command)
+        self.assertIn('host', command)
+        self.assertIn('python', command)
+        self.assertNotIn('synthetic-api-secret', repr(command))
+        self.assertNotIn('env', kwargs)
+        self.assertEqual(json.loads(kwargs['input']), {'token': 'synthetic-api-secret', 'path': '/v3/messages', 'query': {'continue': 0}})
+
+    def test_loopback_refuses_post_remote_failure_and_header_injection(self):
+        client = m.LoopbackAPI('synthetic-api-secret')
+        with patch.object(m.subprocess, 'run') as run:
+            with self.assertRaises(m.Refused):
+                client.request('POST', '/v3/messages', {})
+            with self.assertRaises(m.Refused):
+                m.LoopbackAPI('bad\r\nheader').request('GET', '/v3/messages')
+            run.assert_not_called()
+        failure = subprocess.CompletedProcess([], 0, stdout=b'{"ok":false}', stderr=b'private remote diagnostic')
+        with patch.object(m.subprocess, 'run', return_value=failure):
+            with self.assertRaises(m.Refused):
+                client.request('GET', '/v3/messages')
+
+    def test_deployed_projection_uses_supported_coordinates(self):
+        projection = set(m.FIELDS.split(','))
+        self.assertNotIn('position', projection)
+        self.assertTrue({'x', 'y', 'content', 'linkDetails', 'ownerId', 'created'} <= projection)
+
+
+class RunningEngine(FakeEngine):
+    def __init__(self, environment):
+        super().__init__(environment)
+        self.state['old']['State']['Running'] = True
+        self.state['old']['Mounts'] = [{'Name': 'gangolf-production-twitch-secrets', 'RW': False, 'Destination': '/run/gangolf-credentials'}]
+        self.state['core'].update(Name='/' + m.CORE_NAME, Image='sha256:core', Config={'Env': []},
+            HostConfig={'NetworkMode': 'host', 'RestartPolicy': {'Name': 'unless-stopped'}})
+        self.state['core']['State'].update(Running=True, StartedAt='2026-11-14T00:00:00Z')
+        for name in ('processor', 'divoid-processor-alpha'):
+            self.state[name] = {'Id': name, 'Name': '/' + name, 'State': {'Running': True}}
+
+    def request(self, method, path, body=None, query=None):
+        if method == 'GET' and path == '/images/' + m.HTTP_HELPER_IMAGE + '/json':
+            return {'Id': m.HTTP_HELPER_IMAGE}
+        if method == 'GET' and path == '/containers/json':
+            return [{'Id': 'core', 'State': 'running', 'ImageID': 'sha256:core'}]
+        return super().request(method, path, body, query)
+
+
+class FullCutoverChecks(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
+        self.home.chmod(0o700)
+        config = self.home / '.codex/secrets/gangolf-production-canonical'
+        config.mkdir(parents=True, mode=0o700)
+        environment = {'GANGOLF_DIVOID_TOKEN': 'old-secret', 'GANGOLF_DIVOID_ROOT_ID': '1',
+                       'GANGOLF_DIVOID_MESSAGES_ID': '4', 'GANGOLF_DIVOID_CONFIG_ID': '44'}
+        for path, value in ((config / 'api.env', ''.join(k + '=' + v + '\n' for k, v in environment.items())),
+                            (config / 'ai-core.env', 'GANGOLF_API_KEY=client-secret\n'),
+                            (config.parent / '.gangolf-divoid-gangolf', 'UserId=4\nKey=new-secret\n')):
+            path.write_text(value)
+            path.chmod(0o600)
+        self.engine = RunningEngine(environment)
+        self.state = fixture()
+        self.journal_path = self.home / 'journal'
+        self.history_failure_at = None
+        self.history_calls = 0
+        self.drain_race = False
+        self.unknown_stage_create = False
+
+    def invoke(self):
+        outer = self
+        class Client:
+            def __init__(self, base, token):
+                self.base, self.token = base, token
+
+            def request(self, method, path, body=None, query=None):
+                if self.base == 'http://gangolf:2375':
+                    return outer.engine.request(method, path, body, query)
+                owner = {'new-secret': 4, 'admin-secret': 1, 'old-secret': 3}[self.token]
+                if path == '/users/me':
+                    return {'id': owner, 'enabled': True, 'permissions': ['admin'] if owner == 1 else ['read', 'write']}
+                if method == 'GET' and path == '/nodes' and query and 'id' in query:
+                    node = outer.state.get(query['id'])
+                    if node and owner != 1 and node['ownerId'] != owner and node['access'] == 0:
+                        return {'result': [], 'total': 0, 'continue': None}
+                response = FakeAPI(outer.state, owner).request(method, path, body, query)
+                if outer.unknown_stage_create and owner == 4 and method == 'POST' and path == '/nodes':
+                    raise m.Refused('synthetic response lost after committed root creation')
+                return response
+
+        class Loopback:
+            def __init__(self, token):
+                pass
+
+            def request(self, method, path, body=None, query=None):
+                if path == '/i1/readiness':
+                    return {'status': 'ready'}
+                outer.history_calls += 1
+                if outer.history_calls == outer.history_failure_at:
+                    raise m.Refused('synthetic history failure')
+                return {'result': [{'id': '65'}], 'total': 1, 'continue': None}
+
+        def drain(*args):
+            if self.drain_race and not self.engine.state['core']['State']['Running']:
+                raise m.Refused('synthetic run race after core stop')
+            return (0, 0)
+
+        with contextlib.ExitStack() as stack:
+            for patcher in (patch.object(m, 'HTTP', Client), patch.object(m, 'LoopbackAPI', Loopback),
+                patch.object(m.Path, 'home', return_value=self.home), patch.object(m.getpass, 'getpass', return_value='admin-secret'),
+                patch.object(m.sys.stdin, 'isatty', return_value=True), patch.object(m.sys.stderr, 'isatty', return_value=True),
+                patch('builtins.input', return_value='QUIESCENT'), patch.object(m, 'drain_sample', side_effect=drain),
+                patch.object(m.time, 'sleep'), patch.object(sys, 'argv', ['migrate_identity.py', 'apply', '--journal', str(self.journal_path)]),
+                patch.dict(os.environ, DOCKER_HOST='tcp://gangolf:2375'), contextlib.redirect_stdout(io.StringIO())):
+                stack.enter_context(patcher)
+            m.main()
+
+    def test_full_fake_cutover_reaches_resumed_without_persisting_admin(self):
+        self.invoke()
+        self.assertEqual(m.strict_json(self.journal_path.read_bytes())['phase'], 'resumed')
+        self.assertTrue(self.engine.state['core']['State']['Running'])
+        self.assertTrue(self.engine.state['replacement']['State']['Running'])
+        self.assertNotIn('admin-secret', self.journal_path.read_text())
+
+    def test_history_failure_after_core_stop_restores_both_previous_writers(self):
+        self.history_failure_at = 1
+        with self.assertRaises(m.Refused):
+            self.invoke()
+        self.assertTrue(self.engine.state['core']['State']['Running'])
+        self.assertTrue(self.engine.state['old']['State']['Running'])
+        self.assertEqual(self.state, fixture())
+        self.assertEqual(m.strict_json(self.journal_path.read_bytes())['phase'], 'restored')
+
+    def test_quiet_race_after_core_stop_restores_both_previous_writers(self):
+        self.drain_race = True
+        with self.assertRaises(m.Refused):
+            self.invoke()
+        self.assertTrue(self.engine.state['core']['State']['Running'])
+        self.assertTrue(self.engine.state['old']['State']['Running'])
+        self.assertEqual(m.strict_json(self.journal_path.read_bytes())['phase'], 'restored')
+
+    def test_unknown_stage_create_keeps_pending_evidence_and_both_writers_stopped(self):
+        self.unknown_stage_create = True
+        with self.assertRaises(m.Refused):
+            self.invoke()
+        journal = m.strict_json(self.journal_path.read_bytes())
+        self.assertEqual(journal['pending'], {'create': 'root'})
+        self.assertEqual(journal['phase'], 'rolled-back')
+        self.assertEqual(len(self.state), len(fixture()) + 1)
+        self.assertFalse(self.engine.state['core']['State']['Running'])
+        self.assertFalse(self.engine.state['old']['State']['Running'])
+
+    def test_history_failure_after_api_start_stops_both_without_inverse(self):
+        self.history_failure_at = 2
+        with self.assertRaises(m.Refused):
+            self.invoke()
+        self.assertFalse(self.engine.state['core']['State']['Running'])
+        self.assertFalse(self.engine.state['replacement']['State']['Running'])
+        self.assertEqual(m.strict_json(self.journal_path.read_bytes())['phase'], 'traffic-reconciliation-required')
+        self.assertEqual(self.state[65]['ownerId'], 4)
+
+
+if __name__ == '__main__':
+    unittest.main()
