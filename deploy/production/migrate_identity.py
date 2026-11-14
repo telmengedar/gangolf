@@ -4,7 +4,8 @@ import argparse
 import base64
 import copy
 import getpass
-import hashlib
+import http.client
+import io
 import json
 import os
 from pathlib import Path
@@ -107,6 +108,36 @@ class HTTP:
                 return strict_json(data) if data else None
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
             raise Refused('HTTP request failed; mutation outcome may be unknown') from None
+
+
+class LoopbackAPI:
+    def __init__(self, image, token):
+        self.image, self.token = image, token
+
+    def request(self, method, path, body=None, query=None):
+        require(method == 'GET' and body is None and path in ('/i1/readiness', '/v3/messages'), 'loopback transport is GET-only')
+        require(self.image.startswith('sha256:') and '\r' not in self.token and '\n' not in self.token, 'invalid loopback transport parameters')
+        target = '/api' + path
+        if query:
+            target += '?' + urllib.parse.urlencode(query)
+        request = ('GET ' + target + ' HTTP/1.1\r\nHost: 127.0.0.1:8092\r\nConnection: close\r\n'
+                   + ('Authorization: Bearer ' + self.token + '\r\n' if self.token else '') + '\r\n').encode()
+        try:
+            result = subprocess.run(['docker', '--host', 'tcp://gangolf:2375', 'run', '--pull', 'never',
+                '--rm', '-i', '--network', 'host', '--read-only', '--entrypoint', 'nc', self.image,
+                '-w', '20', '127.0.0.1', '8092'], input=request, capture_output=True, timeout=30, check=False)
+            require(result.returncode == 0 and len(result.stdout) <= 64 * 1024 * 1024, 'loopback API transport failed')
+            class Socket:
+                def makefile(self, *args, **kwargs):
+                    return io.BytesIO(result.stdout)
+            response = http.client.HTTPResponse(Socket())
+            response.begin()
+            require(200 <= response.status < 300, 'loopback API request failed')
+            data = response.read(64 * 1024 * 1024 + 1)
+            require(len(data) <= 64 * 1024 * 1024, 'loopback API response exceeded limit')
+            return strict_json(data) if data else None
+        except (subprocess.SubprocessError, OSError, ValueError, http.client.HTTPException):
+            raise Refused('loopback API transport failed') from None
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -480,13 +511,13 @@ class Runtime:
         self.restore_binding()
         self.preserve_services()
         self.docker.request('POST', '/containers/' + self.journal.data['api_id'] + '/start')
-        wait_ready()
+        wait_ready(self.inspect(self.journal.data['api_id'])['Image'])
         self.docker.request('POST', '/containers/' + self.journal.data['core_id'] + '/start')
         self.journal.phase('restored')
 
 
-def wait_ready():
-    client = HTTP('http://gangolf:8092/api', '')
+def wait_ready(image):
+    client = LoopbackAPI(image, '')
     for attempt in range(30):
         try:
             client.request('GET', '/i1/readiness')
@@ -622,7 +653,7 @@ def main():
         journal.phase('pausing')
         runtime.stop(CORE_NAME)
         require(drain_sample(api['Image'], core['State']['StartedAt']) == drain, 'Processor activity raced with shutdown')
-        history_client = HTTP('http://gangolf:8092/api', env_values(private_bytes(config / 'ai-core.env'))['GANGOLF_API_KEY'])
+        history_client = LoopbackAPI(api['Image'], env_values(private_bytes(config / 'ai-core.env'))['GANGOLF_API_KEY'])
         history = paged(history_client, '/v3/messages', {'descending': 'false'})
         runtime.stop(API_NAME)
         runtime.stopped()
@@ -640,7 +671,7 @@ def main():
         runtime.bind()
         journal.phase('api-starting')
         runtime.start_api()
-        wait_ready()
+        wait_ready(api['Image'])
         after = paged(history_client, '/v3/messages', {'descending': 'false'})
         require(after == history, 'retained v3 history differs')
         migration.verify(False)

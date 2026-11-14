@@ -327,5 +327,40 @@ class RuntimeChecks(unittest.TestCase):
                 m.drain_sample('sha256:pinned', '2026-11-14T00:00:00Z')
 
 
+class LoopbackTransportChecks(unittest.TestCase):
+    def test_host_loopback_get_uses_stdin_secret_and_decodes_chunked_response(self):
+        calls = []
+        def fake(command, **kwargs):
+            calls.append((command, kwargs))
+            payload = b'{"result":[],"total":0,"continue":null}'
+            response = b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n' + format(len(payload), 'x').encode() + b'\r\n' + payload + b'\r\n0\r\n\r\n'
+            return subprocess.CompletedProcess(command, 0, stdout=response, stderr=b'')
+        with patch.object(m.subprocess, 'run', side_effect=fake):
+            result = m.LoopbackAPI('sha256:pinned', 'synthetic-api-secret').request('GET', '/v3/messages', query={'continue': 0})
+        self.assertEqual(result['total'], 0)
+        command, kwargs = calls[0]
+        self.assertEqual(command[-2:], ['127.0.0.1', '8092'])
+        self.assertIn('host', command)
+        self.assertIn('nc', command)
+        self.assertIn('-i', command)
+        self.assertNotIn('synthetic-api-secret', repr(command))
+        self.assertNotIn('env', kwargs)
+        self.assertIn(b'Authorization: Bearer synthetic-api-secret\r\n', kwargs['input'])
+        self.assertTrue(kwargs['input'].startswith(b'GET /api/v3/messages?continue=0 HTTP/1.1'))
+
+    def test_loopback_refuses_post_redirect_and_header_injection(self):
+        client = m.LoopbackAPI('sha256:pinned', 'synthetic-api-secret')
+        with patch.object(m.subprocess, 'run') as run:
+            with self.assertRaises(m.Refused):
+                client.request('POST', '/v3/messages', {})
+            with self.assertRaises(m.Refused):
+                m.LoopbackAPI('sha256:pinned', 'bad\r\nheader').request('GET', '/v3/messages')
+            run.assert_not_called()
+        redirect = subprocess.CompletedProcess([], 0, stdout=b'HTTP/1.1 302 Found\r\nLocation: http://elsewhere\r\nContent-Length: 0\r\n\r\n', stderr=b'')
+        with patch.object(m.subprocess, 'run', return_value=redirect):
+            with self.assertRaises(m.Refused):
+                client.request('GET', '/v3/messages')
+
+
 if __name__ == '__main__':
     unittest.main()

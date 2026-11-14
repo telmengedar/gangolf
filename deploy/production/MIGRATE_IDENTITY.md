@@ -4,7 +4,7 @@
 
 Preparation and fake tests do **not** authorize execution. Use the merged, reviewed helper only after Toni invokes the privileged step and Operations confirms the exact production containers, local endpoints and quiet window. Keep the current service running while waiting. Never paste an admin key into chat, a command, environment variable or file.
 
-The fixed deployment is `tcp://gangolf:2375`, graph `http://gangolf:8091/api`, API `http://gangolf:8092/api`, canonical configuration `~/.codex/secrets/gangolf-production-canonical`, principal4 credential `~/.codex/secrets/.gangolf-divoid-gangolf`. Each credential/environment file must be an owned, single-link regular file with mode0600. The journal directory must be owned and private. No new package dependencies are required; use Python3 and the installed Docker CLI.
+The fixed deployment is `tcp://gangolf:2375`, graph `http://gangolf:8091/api`, API host-loopback `http://127.0.0.1:8092/api` on Gangolf, canonical configuration `~/.codex/secrets/gangolf-production-canonical`, principal4 credential `~/.codex/secrets/.gangolf-divoid-gangolf`. Each credential/environment file must be an owned, single-link regular file with mode0600. The journal directory must be owned and private. No new package dependencies are required; use Python3 and the installed Docker CLI. API history/readiness GETs run through the pinned API image on Gangolf's host network using `nc`; raw request/auth headers travel through stdin, and responses stay private. The API port remains bound to host loopback.
 
 After merge, Operations installs the reviewed helper beside the existing production tooling in `~/.local/share/gangolf-production`. From Toni's interactive terminal:
 
