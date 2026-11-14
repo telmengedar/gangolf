@@ -11,7 +11,7 @@
   },
   {
     "name": "divoid-processor-alpha",
-    "image": "sha256:6c0dadc2c082980e44a791bbc354a6ce41a59df3b893b4fada38ae1b6a908eb1",
+    "image": "sha256:7a91a82b19c382fd9f84a6bb7423ee9cb8cfb7573b49ed7ed7c17e5b7cfaae54",
     "env": "divoid.env",
     "network": "divoid-processor-alpha-net",
     "mounts": [
