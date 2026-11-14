@@ -244,9 +244,14 @@ def inventory(client, query):
     return rows
 
 
+def normalized_edge(edge):
+    return (min(edge[:2]), max(edge[:2]), *edge[2:]) if edge[2] == 'None' else edge
+
+
 def edge_set(node):
     require(isinstance(node.get('linkDetails'), list), 'target links omitted')
-    edges = [(edge['sourceId'], edge['targetId'], edge['linkType'], edge.get('context') or '') for edge in node['linkDetails']]
+    edges = [normalized_edge((edge['sourceId'], edge['targetId'], edge['linkType'], edge.get('context') or ''))
+             for edge in node['linkDetails']]
     require(len(edges) == len(set(edges)), 'duplicate target edge')
     return set(edges)
 
@@ -373,12 +378,12 @@ class Archive:
                         require(actual.get('content') and same_json(decode(actual['content']), payload), 'content outcome unresolved; rerun to reconcile')
             for link_type, context, target_name in relations:
                 edge = (node['id'], self.names[target_name]['id'], link_type, context)
-                if edge not in edge_set(node):
+                if normalized_edge(edge) not in edge_set(node):
                     try:
                         self.client.request('POST', '/nodes/' + str(node['id']) + '/links', edge[1], {'linkType': link_type, 'context': context})
                         self.changes['links'] += 1
                     except Refused:
-                        require(edge in edge_set(self.read_node(node['id'])), 'link outcome unresolved; rerun to reconcile')
+                        require(normalized_edge(edge) in edge_set(self.read_node(node['id'])), 'link outcome unresolved; rerun to reconcile')
                     node['linkDetails'].append({'sourceId': edge[0], 'targetId': edge[1], 'linkType': edge[2], 'context': edge[3]})
         result = self.verify()
         self.state.update(phase='verified', planSha256=self.plan['planSha256'])
@@ -398,7 +403,8 @@ class Archive:
             else:
                 require(node.get('contentType', '').split(';')[0] == 'application/json'
                         and same_json(decode(node.get('content') or 'null'), payload), 'full content/digest verification failed')
-            expected_edges.update((node['id'], self.names[name]['id'], kind, context) for kind, context, name in relations)
+            expected_edges.update(normalized_edge((node['id'], self.names[name]['id'], kind, context))
+                                  for kind, context, name in relations)
         incident = {node['id']: set() for node in self.names.values()}
         for edge in expected_edges:
             incident[edge[0]].add(edge)

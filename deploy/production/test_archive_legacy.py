@@ -259,6 +259,25 @@ class ArchiveTests(unittest.TestCase):
         self.assertFalse(a.same_json({'id': 0}, {'id': False}))
         self.assertFalse(a.same_json({'id': 0}, {'id': 0.0}))
 
+    def test_undirected_membership_orientation_noop_but_directed_reversal_refused(self):
+        self.archive().run()
+        for node in self.graph.nodes.values():
+            node['linkDetails'] = [edge | {'sourceId': edge['targetId'], 'targetId': edge['sourceId']}
+                                   if edge['linkType'] == 'None' else edge.copy()
+                                   for edge in node['linkDetails']]
+        posts = self.graph.posts.copy()
+        self.archive().verify()
+        self.assertEqual(self.archive().run()['changes'], {})
+        self.assertEqual(posts, self.graph.posts)
+        for node in self.graph.nodes.values():
+            node['linkDetails'] = [edge | {'sourceId': edge['targetId'], 'targetId': edge['sourceId']}
+                                   if edge.get('context') == 'authored-by' else edge
+                                   for edge in node['linkDetails']]
+        with self.assertRaises(a.Refused):
+            self.archive().verify()
+        self.assertNotEqual(a.normalized_edge((9, 4, 'None', 'one')),
+                            a.normalized_edge((4, 9, 'None', 'two')))
+
     def test_existing_structured_credential_preserves_equals_without_logging(self):
         path = self.directory / 'credential'
         a.private_write(path, b'User=synthetic\nUserId=4\nKey=synthetic==\n')
