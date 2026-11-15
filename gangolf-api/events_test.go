@@ -532,6 +532,56 @@ func TestEventStreamBoundsAndCancellation(t *testing.T) {
 	}
 }
 
+func TestEventStreamHTTPPerUserLimit(t *testing.T) {
+	f, s := newResourceFixture(t)
+	alternate := addTestKey(f, s, "alternate", "7", "host")
+	f.legacy.cfg.Users["8"] = grant{Enabled: true, Permissions: []string{"host"}}
+	other := addTestKey(f, s, "other", "8", "host")
+	host := eventTestHost(t, s)
+	var streams []*eventTestStream
+	for i := range 4 {
+		key := "key.secret"
+		if i >= 2 {
+			key = alternate
+		}
+		streams = append(streams, openEventTestStream(t, host, key, "types=message.created"))
+	}
+	openEventTestStream(t, host, other, "types=message.created")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	r, _ := http.NewRequestWithContext(ctx, "GET", host.URL+"/api/v3/events?types=message.created", nil)
+	r.Header.Set("Authorization", "Bearer "+alternate)
+	response, err := host.Client().Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != 429 {
+		t.Fatalf("fifth same-user HTTP stream status=%d want=429", response.StatusCode)
+	}
+	streams[0].body.Close()
+	deadline := time.Now().Add(time.Second)
+	for {
+		h := s.eventHub()
+		h.mu.Lock()
+		count := 0
+		for sub := range h.subs {
+			if sub.user == "7" {
+				count++
+			}
+		}
+		h.mu.Unlock()
+		if count == 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("cancelled HTTP stream retained its user's slot")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	openEventTestStream(t, host, alternate, "types=message.created")
+}
+
 func TestEventStreamLongLivedHTTP(t *testing.T) {
 	_, s := newResourceFixture(t)
 	host := httptest.NewUnstartedServer(s)

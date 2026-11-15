@@ -112,6 +112,28 @@ func TestVideoEventProducer(t *testing.T) {
 	status(t, postVideoTest(s, "key.secret", body), 404)
 }
 
+func TestVideoEventProducerForeignSource(t *testing.T) {
+	_, f, s, owned, admin := videoEventFixture(t)
+	f.legacy.cfg.Users["8"] = grant{Enabled: true, Permissions: []string{"host"}}
+	provisionTwitch(t, f, 40, "8", "202")
+	body := `{"service":"Twitch","channel":"202","user":{"service":"Twitch","serviceId":"800","name":"Foreign user"},"chunks":[{"type":0,"data":"foreign source"}],"tts":false}`
+	created := request(t, s, "POST", "/api/v3/messages", admin, body)
+	status(t, created, 201)
+	var foreign messageResource
+	if json.Unmarshal(created.Body.Bytes(), &foreign) != nil || foreign.Channel != "202" || foreign.ChannelID != "41" || foreign.ID == owned.ID {
+		t.Fatal("foreign source was not created in the other tenant's channel")
+	}
+	status(t, postVideoTest(s, "key.secret", `{"messageId":"`+owned.ID+`","triggerId":"1"}`), 200)
+	foreignIntent := `{"messageId":"` + foreign.ID + `","triggerId":"1"}`
+	status(t, postVideoTest(s, "key.secret", foreignIntent), 403)
+	accepted := postVideoTest(s, admin, foreignIntent)
+	status(t, accepted, 200)
+	var event eventEnvelope
+	if json.Unmarshal(accepted.Body.Bytes(), &event) != nil || event.Type != "video.triggered" || event.Channel != foreign.Channel || event.ChannelID == nil || *event.ChannelID != foreign.ChannelID {
+		t.Fatal("effective admin did not publish the foreign source intent")
+	}
+}
+
 func TestVideoEventSubscriptionIsolation(t *testing.T) {
 	media, f, s, msg, admin := videoEventFixture(t)
 	f.legacy.cfg.Users["8"] = grant{Enabled: true, Permissions: []string{"host"}}
