@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 )
 
@@ -28,7 +30,7 @@ func (s *server) bootstrapAdmin(ctx context.Context, name, path string) (string,
 		return "", "", errUnavailable
 	}
 	info, err := output.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+	if err != nil || !safeBootstrapOutput(info, info) {
 		return "", "", errUnavailable
 	}
 	if err = lockResources(ctx); err != nil {
@@ -73,14 +75,8 @@ func (s *server) bootstrapAdmin(ctx context.Context, name, path string) (string,
 	if err = output.Close(); err != nil {
 		return "", "", errUnavailable
 	}
-	directory, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return "", "", errUnavailable
-	}
-	err = directory.Sync()
-	closeErr := directory.Close()
-	if err != nil || closeErr != nil {
-		return "", "", errUnavailable
+	if err = verifyBootstrapOutput(path, info, token); err != nil {
+		return "", "", err
 	}
 	hash := hmac.New(sha256.New, []byte(s.pepper))
 	hash.Write([]byte(token))
@@ -89,6 +85,9 @@ func (s *server) bootstrapAdmin(ctx context.Context, name, path string) (string,
 	cfg.APIKeys[keyID] = keyGrant{UserID: userID, Hash: hash.Sum(nil), Enabled: true, Permissions: []string{"admin", "host"}, Scope: "api", ExpiresAt: &expiry}
 	if err = s.graph.saveAuth(ctx, cfg); err != nil {
 		return "", "", err
+	}
+	if err = verifyBootstrapOutput(path, info, token); err != nil {
+		return "", "", errOutcomeUnknown
 	}
 	return userID, keyID, nil
 }
@@ -112,4 +111,49 @@ func bootstrapAdminCommand(args []string) error {
 		return err
 	}
 	return json.NewEncoder(os.Stdout).Encode(map[string]string{"userId": userID, "keyId": keyID, "file": *path})
+}
+
+func safeBootstrapOutput(actual, original os.FileInfo) bool {
+	stat, ok := actual.Sys().(*syscall.Stat_t)
+	return ok && actual.Mode().IsRegular() && actual.Mode().Perm() == 0600 && stat.Nlink == 1 && stat.Uid == uint32(os.Geteuid()) && os.SameFile(actual, original)
+}
+
+func verifyBootstrapOutput(path string, original os.FileInfo, token string) error {
+	info, err := os.Lstat(path)
+	if err != nil || !safeBootstrapOutput(info, original) {
+		return errUnavailable
+	}
+	file, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return errUnavailable
+	}
+	defer file.Close()
+	info, err = file.Stat()
+	if err != nil || !safeBootstrapOutput(info, original) {
+		return errUnavailable
+	}
+	content, err := io.ReadAll(io.LimitReader(file, int64(len(token)+2)))
+	if err != nil || !bytes.Equal(content, []byte(token+"\n")) {
+		return errUnavailable
+	}
+	if err = file.Sync(); err != nil {
+		return errUnavailable
+	}
+	if err = file.Close(); err != nil {
+		return errUnavailable
+	}
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return errUnavailable
+	}
+	err = directory.Sync()
+	closeErr := directory.Close()
+	if err != nil || closeErr != nil {
+		return errUnavailable
+	}
+	info, err = os.Lstat(path)
+	if err != nil || !safeBootstrapOutput(info, original) {
+		return errUnavailable
+	}
+	return nil
 }

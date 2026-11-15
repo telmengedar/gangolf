@@ -56,6 +56,9 @@ func (c *authConfig) valid() bool {
 	}
 	bindings := map[string]bool{}
 	for id, u := range c.Users {
+		if u.ManagedOnly && u.ProfileNodeID == "" {
+			return false
+		}
 		if u.ProfileNodeID != "" {
 			if _, ok := resourceID(id); !ok {
 				return false
@@ -222,6 +225,9 @@ func effectivePermissions(key, user []string) []string {
 func (s *server) boundPrincipal(ctx context.Context, cfg *authConfig, p principal) (principal, int) {
 	user := cfg.Users[p.UserID]
 	if user.ProfileNodeID == "" {
+		if user.ManagedOnly {
+			return principal{}, http.StatusServiceUnavailable
+		}
 		return p, 0
 	}
 	nodeID, ok := resourceID(user.ProfileNodeID)

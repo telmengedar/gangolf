@@ -47,12 +47,11 @@ func (s *server) v3(ctx context.Context, w http.ResponseWriter, r *http.Request)
 		failure(w, 401, "unauthorized")
 		return
 	}
-	resourceLock.Lock()
-	defer resourceLock.Unlock()
-	if ctx.Err() != nil {
+	if err := lockResources(ctx); err != nil {
 		storageFailure(w, errUnavailable)
 		return
 	}
+	defer resourceLock.Unlock()
 	cfg, err := s.graph.loadConfig(ctx)
 	if err != nil {
 		storageFailure(w, err)

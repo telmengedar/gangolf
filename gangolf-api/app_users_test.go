@@ -336,3 +336,28 @@ func TestAppUserUnconfirmedGrantDoesNotActivateProfile(t *testing.T) {
 		status(t, appRequest(t, s, "GET", "/api/v3/users/"+strconv.FormatInt(nodeID, 10), "key.secret", ""), 404)
 	}
 }
+
+func TestManagedOnlyGrantRequiresProfileBinding(t *testing.T) {
+	f, s := newResourceFixture(t)
+	id := createAppTestUser(t, s, "Alice")
+	token := issueAppTestToken(t, s, id, `{}`)
+	f.legacy.mu.Lock()
+	user := f.legacy.cfg.Users[id]
+	user.ProfileNodeID = ""
+	f.legacy.cfg.Users[id] = user
+	f.legacy.mu.Unlock()
+	if !user.ManagedOnly {
+		t.Fatal("managed corruption scenario absent")
+	}
+	response := appRequest(t, s, "GET", "/api/v3/users/current/tokens", token, "")
+	if response.Code < 400 {
+		t.Fatal("managed-only grant with missing binding authenticated")
+	}
+	if f.legacy.cfg.valid() {
+		t.Fatal("managed-only missing binding accepted as valid config")
+	}
+	cfg := f.legacy.cfg
+	if _, status := s.boundPrincipal(context.Background(), &cfg, principal{UserID: id}); status == 0 {
+		t.Fatal("managed-only missing binding accepted as legacy principal")
+	}
+}
