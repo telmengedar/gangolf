@@ -1,4 +1,4 @@
-# Gangolf API media catalog
+# Gangolf API
 
 Clips and triggers are managed through `/api/v3/clips` and `/api/v3/triggers`. The catalog contains mutable metadata, not downloaded media. It does not execute triggers or play videos.
 
@@ -94,3 +94,104 @@ This command exits without opening a listener or starting Twitch. It reads only 
 After authorized installation, paginate both collections and verify those totals, retrieve one of each, and exercise CRUD with synthetic records. Verify clip deletion is restricted until its synthetic trigger is removed. Remove synthetic records in dependency order. Do not repair historical dangling records without a separate decision. Independently verify the frozen archive and existing live controls remain unchanged.
 
 The catalog is limited to 8 MiB. Each accepted mutation replaces it once under a process mutex. Run exactly one API writer; run seed only while that service is stopped. There is no distributed compare-and-swap or protection against external generic graph writers. Multi-instance writers or a larger catalog require a revised storage contract.
+
+
+## Live events
+
+`GET /api/v3/events` opens a live SSE subscription. Use the existing bearer API key or JWT in the Authorization header. Query credentials are rejected, including when a bearer is present. Fetch supports this header; native `EventSource` does not. Consume through an authorized same-origin route. The current deployment listens on host loopback; this source change does not configure browser reachability, CORS, TLS, or proxy buffering.
+
+```sh
+curl --no-buffer --get "$GANGOLF_API/api/v3/events" \
+  --header "Authorization: Bearer $GANGOLF_TOKEN" \
+  --header 'Accept: text/event-stream' \
+  --data-urlencode 'types=message.created,video.triggered' \
+  --data-urlencode 'service=Twitch' \
+  --data-urlencode 'channel=101'
+```
+
+`types` is required: one or both of `message.created` and `video.triggered`, comma-separated, without duplicates. Optional `service` and `channel` are exact, case-sensitive filters; `channel` requires `service`. Types are ORed, service/channel are ANDed. Omit service/channel to receive all currently readable events. Unknown, repeated, empty, malformed, or unsupported parameters return 400 `invalid_filter`; decoded service/channel have a 256-character limit and the query a 4096-byte limit. Filters never grant permission.
+
+The first flushed frame is:
+
+```text
+event: stream.ready
+data: {"schemaVersion":1,"replay":false,"resyncRequired":true}
+
+```
+
+Data frames have `event: message.created` or `event: video.triggered` and one compact JSON `data:` line. Their envelope is `{schemaVersion:1,id,type,time,service,channel,channelId,data}`. `id` is an unpredictable process epoch plus a process-local sequence. It is useful for diagnostics/deduplication, never a durable cursor; sequence gaps are normal. `time` is server publication UTC time. `channelId` is a v3 channel ID or null for legacy v2 messages. No SSE `id:` field is sent.
+
+Message data is either `{resourceVersion:3,message:<existing v3 message resource>}` or `{resourceVersion:2,batchId,index,message:<existing v2 message>}`. Legacy `index` is the zero-based batch position. Actual accepted chunks, timestamps, source and delivery fields are preserved. Events cover successful local v3 creation, legacy batches, new Twitch inbound messages, and the first confirmed outbound reservation. Outbound creation honestly has `delivery.state:"unknown"` because the event precedes sending. Retries/replays, terminal delivery changes, PATCH, DELETE, history reads and imports do not emit a second creation event.
+
+Each data frame and every 15-second heartbeat reloads authorization. API keys retain their own effective permissions even if their user is admin. Existing message-read rules apply: Twitch messages require the current tenant/broadcaster/channel association or effective admin; non-Twitch messages remain shared among authorized hosts. Disabled Twitch profiles retain their existing read semantics. Video subscriptions additionally require available current media storage and its configured tenant or effective admin. A nonadmin never receives video intents derived from shared non-Twitch messages. Revocation, expiry, unavailable auth/media storage, disconnect, overflow, ambiguous message creation or shutdown ends the stream; idle revocation is detected on the next heartbeat plus its bounded 10-second authorization operation. Message-only streams do not depend on media availability.
+
+There are 16 streams total and 4 per user across all their keys. A stream can queue 64 events and at most 8 MiB of encoded frames; an individual frame is limited to 8 MiB. Matching slow subscribers are disconnected when they exceed either queue limit; producers and other subscribers continue. Each write/flush has a 5-second deadline. Heartbeat comments keep the connection active. Unsupported flush/deadline writers return 503 `stream_unavailable`; exhausted stream slots return 429 `stream_limit`. Incompatible Accept returns 406; request bodies return 400; non-GET methods return 405. Existing 401/403/503 authorization/storage errors use the normal JSON envelope before streaming begins. Failures after headers normally close the connection.
+
+This is a single-process live feed with no replay, outbox, history, or lossless execution guarantee. `Last-Event-ID` returns 409 `replay_not_supported`. External graph writes and other API processes are not observed. Every EOF/error may mean missed events; reconnect always requires resynchronization, even if no reset frame arrived. Publication follows observed storage success and is not atomic with persistence.
+
+For v3 bootstrap, open the stream and buffer creation data, wait for ready, then fetch authorized v3 message history using the same service/channel filters. Merge history and buffered messages by `message.id`, displaying each ID once, then continue live. Bound the frontend buffer; reset/reconnect if buffering or history fails. Paginated history is not an atomic snapshot of edits/deletions/delivery updates. Legacy v2 history lacks batch/index identity, so reliable history/live deduplication is unavailable for that variant. Video intents have no durable history: never automatically replay or execute old buffered video intents after reconnect.
+
+A minimal bearer fetch reader follows. `receive` handles ready and data frames; the caller owns bounded bootstrap buffering, ID merging, reconnect policy and connection-state display. Cancellation uses an AbortSignal. UTF-8 decoding handles byte fragments, SSE comments are ignored, CRLF is accepted, and frames are bounded. An ended stream throws so the caller starts a fresh bootstrap.
+
+```js
+async function readEvents(url, token, receive, signal) {
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}`, Accept: "text/event-stream" },
+    signal
+  });
+  if (response.status !== 200 ||
+      !response.headers.get("content-type")?.startsWith("text/event-stream")) {
+    await response.body?.cancel();
+    throw new Error(`Event connection failed: ${response.status}`);
+  }
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  let pending = "", event = "message", data = [], frameSize = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error("Event connection ended; resynchronize");
+      pending += value;
+      if (pending.length > 8 * 1024 * 1024) throw new Error("Event frame too large");
+      let end;
+      while ((end = pending.indexOf("\n")) !== -1) {
+        let line = pending.slice(0, end);
+        pending = pending.slice(end + 1);
+        if (line.endsWith("\r")) line = line.slice(0, -1);
+        frameSize += line.length + 1;
+        if (frameSize > 8 * 1024 * 1024) throw new Error("Event frame too large");
+        if (line === "") {
+          if (data.length) await receive(event, JSON.parse(data.join("\n")));
+          event = "message";
+          data = [];
+          frameSize = 0;
+        } else if (!line.startsWith(":")) {
+          const separator = line.indexOf(":");
+          const field = separator < 0 ? line : line.slice(0, separator);
+          let text = separator < 0 ? "" : line.slice(separator + 1);
+          if (text.startsWith(" ")) text = text.slice(1);
+          if (field === "event") event = text;
+          if (field === "data") data.push(text);
+        }
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+```
+
+## Video event intents
+
+`POST /api/v3/video-events` explicitly publishes a validated `video.triggered` intent. It does not match trigger text, download media, queue playback, or claim a video played. The request accepts exactly two canonical positive decimal string IDs; unknown/duplicate fields, null/missing IDs and client-selected clip/channel/tenant/payload fields are rejected. Use `application/json`, bearer authorization, no query parameters, and at most 1 MiB of body.
+
+```sh
+curl "$GANGOLF_API/api/v3/video-events" \
+  --header "Authorization: Bearer $GANGOLF_TOKEN" \
+  --header 'Content-Type: application/json' \
+  --data '{"messageId":"123","triggerId":"9"}'
+```
+
+The caller must be the configured media tenant or effective admin, and the source must be a visible nondeleted v3 message with validated relations. Nonadmins additionally need a Twitch source belonging to the catalog tenant through its current profile association; shared non-Twitch records have no tenant attribution. The current trigger must resolve to an existing clip. The server derives routing and `{messageId,trigger,clip}` from current stored DTOs, then returns 200 with the emitted envelope, even with no subscribers. There is no durable item/Location or event GET history, no storage writes and no automatic text-match requirement. A repeated POST creates a fresh intent. An ambiguous response must not be blindly retried because duplicate intents are possible.
+
+Missing message/trigger returns 404 `not_found`, unauthorized source 403 `forbidden`, unresolved clip 409 `unresolved_trigger`, and absent/unavailable media 503 `media_unavailable`. Existing bearer authentication failures apply. Other methods return 405 `Allow: POST`. Reuse the ordinary clips/triggers API to manage the catalog; archives are never consulted by event production.

@@ -2,14 +2,19 @@ package main
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
 func lockResources(ctx context.Context) error {
+	return lockMutex(ctx, &resourceLock)
+}
+
+func lockMutex(ctx context.Context, mu *sync.Mutex) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if resourceLock.TryLock() {
+	if mu.TryLock() {
 		return nil
 	}
 	ticker := time.NewTicker(time.Millisecond)
@@ -19,7 +24,7 @@ func lockResources(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if resourceLock.TryLock() {
+			if mu.TryLock() {
 				return nil
 			}
 		}

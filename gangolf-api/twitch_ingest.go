@@ -254,6 +254,12 @@ func (s *server) ingestTwitch(ctx context.Context, p twitchProfile, e twitchEven
 		return 0, err
 	}
 	writeErr := g.replaceContent(ctx, n.ID, m)
+	committed := false
+	defer func() {
+		if !committed {
+			s.eventHub().reset()
+		}
+	}()
 	read, found, err := g.inboundLookup(ctx, name, owner)
 	if err != nil || !found || read.Content == nil || *read.Content == "" {
 		if writeErr != nil {
@@ -265,6 +271,8 @@ func (s *server) ingestTwitch(ctx context.Context, p twitchProfile, e twitchEven
 	if err != nil || !stored.Time.Equal(m.Time) || stored.Source.MessageID != e.MessageID {
 		return 0, errCorrupt
 	}
+	committed = true
+	s.createdMessage(read.ID, stored)
 	return read.ID, nil
 }
 
