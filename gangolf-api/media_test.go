@@ -724,3 +724,44 @@ func TestMediaSeedCLI(t *testing.T) {
 	}
 	mediaWant(t, s, "GET", "/api/v3/clips", "", 200)
 }
+func TestMediaConfiguredReadiness(t *testing.T) {
+	for _, mode := range []string{"healthy", "empty", "unavailable", "wrong-auth", "wrong-tenant", "disabled", "primary-failure"} {
+		t.Run(mode, func(t *testing.T) {
+			f, auth, s := newMediaFixture(t)
+			expected := 503
+			switch mode {
+			case "healthy":
+				expected = 200
+			case "empty":
+				f.catalog.Content = nil
+			case "unavailable":
+				f.fail = "all"
+			case "wrong-auth":
+				c := f.state(t)
+				c.AuthConfigID = "99"
+				f.set(c)
+			case "wrong-tenant":
+				c := f.state(t)
+				c.TenantUserID = "99"
+				f.set(c)
+			case "disabled":
+				s.media = nil
+				f.fail = "all"
+				expected = 200
+			case "primary-failure":
+				auth.fail = "identity"
+			}
+			w := mediaWant(t, s, "GET", "/api/i1/readiness", "", expected)
+			if expected == 200 && !strings.Contains(w.Body.String(), `"ready"`) || expected == 503 && !strings.Contains(w.Body.String(), `"unready"`) {
+				t.Fatal("readiness representation")
+			}
+			mediaWant(t, s, "GET", "/api/i1/health", "", 200)
+			if f.writes != 0 || len(f.queries) != 0 {
+				t.Fatal("readiness mutated or queried archive")
+			}
+			if mode != "primary-failure" {
+				mediaWant(t, s, "GET", "/api/v3/messages", "", 200)
+			}
+		})
+	}
+}
