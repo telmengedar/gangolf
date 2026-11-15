@@ -35,6 +35,10 @@ func bootstrap() (*server, string, error) {
 	}
 	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	s := &server{graph: &graph{base: base, token: token, root: ids[0], group: ids[1], config: ids[2], http: client}, pepper: pepper, now: time.Now}
+	s.media, err = configureMedia(s.graph)
+	if err != nil {
+		return nil, "", err
+	}
 	s.twitch = &twitchRuntime{client: productionTwitchClient(os.Getenv("GANGOLF_TWITCH_CREDENTIAL_DIR"))}
 	addr := os.Getenv("GANGOLF_LISTEN")
 	if addr == "" {
@@ -44,6 +48,9 @@ func bootstrap() (*server, string, error) {
 }
 
 func run() error {
+	if len(os.Args) > 1 && os.Args[1] == "seed-media" {
+		return seedMediaCommand(os.Args[2:])
+	}
 	handler, addr, err := bootstrap()
 	if err != nil {
 		return err

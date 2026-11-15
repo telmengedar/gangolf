@@ -14,6 +14,7 @@ import (
 )
 
 type server struct {
+	media  *mediaStore
 	twitch *twitchRuntime
 	graph  *graph
 	pepper string
@@ -54,6 +55,11 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			_, err = s.graph.list(ctx)
 		}
+		if err == nil && s.media != nil {
+			s.media.mu.Lock()
+			_, err = s.media.load(ctx)
+			s.media.mu.Unlock()
+		}
 		if err != nil {
 			respond(w, 503, map[string]string{"status": "unready"})
 			return
@@ -63,6 +69,10 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/api/i1/twitch/channels" {
 		s.twitchChannels(ctx, w, r)
+		return
+	}
+	if r.URL.Path == "/api/v3/clips" || strings.HasPrefix(r.URL.Path, "/api/v3/clips/") || r.URL.Path == "/api/v3/triggers" || strings.HasPrefix(r.URL.Path, "/api/v3/triggers/") {
+		s.mediaHTTP(ctx, w, r)
 		return
 	}
 	if r.URL.Path != "/api/v2/messages" {
