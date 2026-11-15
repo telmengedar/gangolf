@@ -14,6 +14,7 @@ import (
 )
 
 type server struct {
+	events *eventHub
 	media  *mediaStore
 	twitch *twitchRuntime
 	graph  *graph
@@ -44,8 +45,16 @@ func storageFailure(w http.ResponseWriter, err error) {
 }
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/api/v3/events" {
+		s.streamEvents(w, r)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
+	if r.URL.Path == "/api/v3/video-events" {
+		s.videoEvent(ctx, w, r)
+		return
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/api/i1/health" {
 		respond(w, 200, map[string]string{"status": "live"})
 		return
@@ -161,8 +170,14 @@ func (s *server) post(ctx context.Context, w http.ResponseWriter, r *http.Reques
 	}
 	id, err := s.graph.append(ctx, messages)
 	if err != nil {
+		if errors.Is(err, errOutcomeUnknown) {
+			s.eventHub().reset()
+		}
 		storageFailure(w, err)
 		return
+	}
+	for i, m := range messages {
+		s.createdLegacy(id, i, m)
 	}
 	respond(w, 201, map[string]any{"batchId": id, "result": messages})
 }

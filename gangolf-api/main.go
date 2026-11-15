@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -70,13 +71,14 @@ func serve(handler *server, addr string) error {
 	receiverDone := make(chan struct{})
 	go func() { defer close(receiverDone); handler.runTwitch(ctx) }()
 	defer func() { stop(); <-receiverDone }()
-	srv := &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 35 * time.Second, WriteTimeout: 35 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	srv := &http.Server{Addr: addr, Handler: handler, BaseContext: func(net.Listener) context.Context { return ctx }, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 35 * time.Second, WriteTimeout: 35 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	done := make(chan error, 1)
 	go func() { done <- srv.ListenAndServe() }()
 	select {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
+		handler.eventHub().shutdown()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		return srv.Shutdown(shutdown)

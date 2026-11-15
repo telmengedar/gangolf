@@ -122,9 +122,11 @@ func (s *server) createTwitchOutbound(ctx context.Context, w http.ResponseWriter
 	}
 	id, err := s.graph.reserveOutbound(ctx, name, m, current.serviceOwner)
 	if err != nil {
+		s.eventHub().reset()
 		deliveryFailure(w, 503, "delivery_outcome_unknown", id)
 		return
 	}
+	s.createdMessage(id, m)
 	w.Header().Set("Location", deliveryLocation(id))
 	resourceLock.Unlock()
 	var state, messageID, resultCode string

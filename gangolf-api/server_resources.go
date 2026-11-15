@@ -238,9 +238,13 @@ func (s *server) createV3(ctx context.Context, w http.ResponseWriter, r *http.Re
 	m := messageContent{SchemaVersion: 1, UserID: strconv.FormatInt(uid, 10), ChannelID: channelID, ReplyTo: input.ReplyTo, Time: s.now().UTC(), Service: input.Service, Channel: input.Channel, User: &input.User, Chunks: input.Chunks, TTS: &input.TTS}
 	id, err := s.graph.publishMessage(ctx, m, owner)
 	if err != nil {
+		if errors.Is(err, errOutcomeUnknown) {
+			s.eventHub().reset()
+		}
 		storageFailure(w, err)
 		return
 	}
+	s.createdMessage(id, m)
 	w.Header().Set("Location", "/api/v3/messages/"+strconv.FormatInt(id, 10))
 	respond(w, 201, m.resource(id))
 }
