@@ -45,12 +45,24 @@ func storageFailure(w http.ResponseWriter, err error) {
 }
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	var credentialsValid bool
+	r, credentialsValid = prepareCredential(r)
+	if !credentialsValid {
+		failure(w, 401, "unauthorized")
+		return
+	}
 	if r.URL.Path == "/api/v3/events" {
 		s.streamEvents(w, r)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
+	if r.URL.Path == "/api/v3/users" || strings.HasPrefix(r.URL.Path, "/api/v3/users/") || r.URL.Path == "/api/v3/tokens" || strings.HasPrefix(r.URL.Path, "/api/v3/tokens/") || r.URL.Path == "/api/v3/channels" || strings.HasPrefix(r.URL.Path, "/api/v3/channels/") {
+		s.appHTTP(ctx, w, r)
+		return
+	}
 	if r.URL.Path == "/api/v3/video-events" {
 		s.videoEvent(ctx, w, r)
 		return
@@ -102,7 +114,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		failure(w, 401, "unauthorized")
 		return
 	}
-	if r.Method == http.MethodPost {
+	{
 		if err := lockResources(ctx); err != nil {
 			storageFailure(w, err)
 			return
@@ -150,6 +162,15 @@ func (s *server) post(ctx context.Context, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	for _, m := range messages {
+		allowed, err := policy.allowed(ctx, m.Service, m.Channel, "", true)
+		if err != nil {
+			storageFailure(w, err)
+			return
+		}
+		if !allowed {
+			failure(w, 403, "forbidden")
+			return
+		}
 		if nonNull(m.PostTo) {
 			failure(w, 422, "delivery_not_supported")
 			return
@@ -259,7 +280,12 @@ func (s *server) get(ctx context.Context, w http.ResponseWriter, r *http.Request
 	}
 	matches := make([]storedMessage, 0)
 	for _, m := range all {
-		if !policy.visible(m.Service, m.Channel, "") {
+		allowed, err := policy.allowed(ctx, m.Service, m.Channel, "", false)
+		if err != nil {
+			storageFailure(w, err)
+			return
+		}
+		if !allowed {
 			continue
 		}
 		if !f.from.IsZero() && m.Time.Before(f.from) || !f.to.IsZero() && !m.Time.Before(f.to) || f.service != "" && m.Service != f.service || f.channel != "" && m.Channel != f.channel {

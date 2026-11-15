@@ -23,18 +23,23 @@ type eventTestStream struct {
 
 func openEventTestStream(t *testing.T, host *httptest.Server, token, query string) *eventTestStream {
 	t.Helper()
-	r, _ := http.NewRequest("GET", host.URL+"/api/v3/events?"+query, nil)
-	r.Header.Set("Authorization", "Bearer "+token)
+	ctx, cancel := context.WithCancel(context.Background())
+	r, _ := http.NewRequestWithContext(ctx, "GET", host.URL+"/api/v3/events?"+query, nil)
+	if token != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
 	response, err := host.Client().Do(r)
 	if err != nil {
+		cancel()
 		t.Fatal(err)
 	}
 	if response.StatusCode != 200 || response.Header.Get("Content-Type") != "text/event-stream; charset=utf-8" || response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("X-Accel-Buffering") != "no" {
+		cancel()
 		response.Body.Close()
 		t.Fatalf("handshake status=%d", response.StatusCode)
 	}
 	s := &eventTestStream{frames: make(chan string, 256), body: response.Body}
-	t.Cleanup(func() { s.body.Close() })
+	t.Cleanup(func() { cancel(); s.body.Close() })
 	go func() {
 		defer close(s.frames)
 		scanner := bufio.NewScanner(s.body)
@@ -101,6 +106,9 @@ func eventTestHost(t *testing.T, s *server) *httptest.Server {
 
 func TestEventStreamFiltersAndFraming(t *testing.T) {
 	_, f, s := newMediaFixture(t)
+	user := f.legacy.cfg.Users["7"]
+	user.Permissions = []string{"admin", "host"}
+	f.legacy.cfg.Users["7"] = user
 	key := addTestKey(f, s, "admin", "7", "admin")
 	stream := openEventTestStream(t, eventTestHost(t, s), key, "types=message.created,video.triggered&service=Local&channel=room")
 	s.publishEvent("message.created", "Local", "other", nil, "ignored")
@@ -122,7 +130,13 @@ func TestEventStreamFiltersAndFraming(t *testing.T) {
 func TestEventStreamValidation(t *testing.T) {
 	_, s := newResourceFixture(t)
 	for _, query := range []string{"", "types=", "types=unknown", "types=message.created,message.created", "types=message.created&types=video.triggered", "types=message.created&channel=x", "types=message.created&service=", "types=message.created&unknown=x", "types=message.created&service=%zz", "types=message.created&service=" + strings.Repeat("x", 257), "types=message.created&service=" + strings.Repeat("x", 4096)} {
-		t.Run(query[:min(len(query), 50)], func(t *testing.T) { status(t, request(t, s, "GET", "/api/v3/events?"+query, "key.secret", ""), 400) })
+		t.Run(query[:min(len(query), 50)], func(t *testing.T) {
+			want := 400
+			if strings.Contains(query, "%zz") {
+				want = 401
+			}
+			status(t, request(t, s, "GET", "/api/v3/events?"+query, "key.secret", ""), want)
+		})
 	}
 	for _, tc := range []struct {
 		method, path, token, header, value, body string

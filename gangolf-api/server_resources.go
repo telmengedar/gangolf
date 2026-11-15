@@ -193,6 +193,15 @@ func (s *server) createV3(ctx context.Context, w http.ResponseWriter, r *http.Re
 		failure(w, 400, "invalid_message")
 		return
 	}
+	allowed, accessErr := policy.allowed(ctx, input.Service, input.Channel, "", true)
+	if accessErr != nil {
+		storageFailure(w, accessErr)
+		return
+	}
+	if !allowed {
+		failure(w, 403, "forbidden")
+		return
+	}
 	if strings.EqualFold(input.Service, "Twitch") && !policy.principal.admin() {
 		failure(w, 403, "forbidden")
 		return
@@ -211,7 +220,12 @@ func (s *server) createV3(ctx context.Context, w http.ResponseWriter, r *http.Re
 		}
 		var found bool
 		parent, found = all[pid]
-		if !found || parent.Deleted || !policy.visible(parent.Service, parent.Channel, parent.ChannelID) {
+		parentVisible, accessErr := policy.allowed(ctx, parent.Service, parent.Channel, parent.ChannelID, false)
+		if accessErr != nil {
+			storageFailure(w, accessErr)
+			return
+		}
+		if !found || parent.Deleted || !parentVisible {
 			failure(w, 404, "not_found")
 			return
 		}
@@ -307,7 +321,12 @@ func (s *server) listV3(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	}
 	result := make([]messageResource, 0)
 	for id, m := range all {
-		if !policy.visible(m.Service, m.Channel, m.ChannelID) {
+		visible, accessErr := policy.allowed(ctx, m.Service, m.Channel, m.ChannelID, false)
+		if accessErr != nil {
+			storageFailure(w, accessErr)
+			return
+		}
+		if !visible {
 			continue
 		}
 		if m.Deleted || !f.from.IsZero() && m.Time.Before(f.from) || !f.to.IsZero() && !m.Time.Before(f.to) || f.service != "" && m.Service != f.service || f.channel != "" && m.Channel != f.channel || ids["userId"] != "" && m.UserID != ids["userId"] || ids["channelId"] != "" && m.ChannelID != ids["channelId"] || ids["replyTo"] != "" && (m.ReplyTo == nil || *m.ReplyTo != ids["replyTo"]) {

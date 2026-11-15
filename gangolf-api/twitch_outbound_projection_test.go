@@ -79,8 +79,11 @@ func TestResolveIdentity_FieldSelectedUserAndChannel_PreservesCanonicalIdentity(
 			_, s, value, _ := identityQueryFixture(t, kind)
 			trimmed := honorIdentityFieldSelection(t, s)
 			id, err := s.graph.resolveIdentity(context.Background(), kind, value, 20)
-			if *trimmed == 0 {
+			if kind == "user" && *trimmed == 0 {
 				t.Fatal("field selection was not exercised")
+			}
+			if kind == "channel" && *trimmed != 0 {
+				t.Fatal("channel embedding metadata was not selected")
 			}
 			if err != nil || id <= 0 {
 				t.Fatalf("field-selected %s identity failed: %v", kind, err)

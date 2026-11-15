@@ -124,7 +124,7 @@ func TestV3_ServeHTTP_RoutesAndAuthorization(t *testing.T) {
 		allow               string
 	}{
 		{"POST", "/api/v3/messages", "", 401, ""}, {"POST", "/api/v3/messages", "key.wrong", 401, ""},
-		{"GET", "/api/v3/messages?apiKey=key.secret", "", 200, ""},
+		{"GET", "/api/v3/messages?apiKey=key.secret", "", 401, ""},
 		{"GET", "/api/v3/messages?apiKey=key.secret", "bad", 401, ""},
 		{"POST", "/api/v3/messages?apiKey=key.secret", "", 401, ""},
 		{"PATCH", "/api/v3/messages/100?apiKey=key.secret", "", 401, ""},
@@ -324,7 +324,7 @@ func TestV3_ExactDomainMembershipScopesQueriesAndPreservesSemanticLinks(t *testi
 		}
 	}
 	for _, q := range f.queries {
-		if q.Get("rootNodeId") != "10" || q.Get("linkedto") == "" && q.Get("name") == "" || q.Get("type") == "" {
+		if (q.Get("type") != "channel" && q.Get("rootNodeId") != "10" || q.Get("type") == "channel" && q.Get("rootNodeId") != "") || q.Get("linkedto") == "" && q.Get("name") == "" || q.Get("type") == "" {
 			t.Fatalf("unscoped collection query: %v", q)
 		}
 	}
@@ -405,9 +405,14 @@ func TestV3_ResolveIdentity_ServiceAndTypeRootFiltersAreLoadBearing(t *testing.T
 	f.nodes[14] = node{ID: 14, Name: userName, Type: "user", Root: 99, Owner: 20, Access: json.RawMessage(`"None"`)}
 	f.nodes[15] = node{ID: 15, Name: channelName, Type: "user", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)}
 	f.nodes[16] = node{ID: 16, Name: channelName, Type: "channel", Root: 99, Owner: 20, Access: json.RawMessage(`"None"`)}
+	status(t, request(t, s, "POST", "/api/v3/messages", "key.secret", v3Message), 500)
+	if f.nodes[16].Root != 99 {
+		t.Fatal("invalid channel shadow permitted publication")
+	}
+	delete(f.nodes, 16)
 	m := createResource(t, s, v3Message)
-	if m.UserID != "100" || m.ChannelID != "101" || len(f.nodes) != 7 {
-		t.Fatalf("foreign root/type matched natural keys: %+v nodes=%d", m, len(f.nodes))
+	if m.UserID != "100" || m.ChannelID != "101" {
+		t.Fatal("foreign author/type affected canonical identity")
 	}
 }
 
@@ -597,7 +602,11 @@ func TestV3_ListV3_FiltersNumericOrderAndGraphPages(t *testing.T) {
 		t.Fatal("graph paging not exercised")
 	}
 	for _, q := range []string{"userId=01", "channelId=0", "replyTo=abc", "replyTo=1&replyTo=2", "count=0", "continue=-1", "sort=id", "descending=bad", "bogus=1", "service=a&service=b", "from=no", "to=no", "x=%XX", "count=1;continue=2"} {
-		status(t, request(t, s, "GET", "/api/v3/messages?"+q, "key.secret", ""), 400)
+		want := 400
+		if _, err := url.ParseQuery(q); err != nil {
+			want = 401
+		}
+		status(t, request(t, s, "GET", "/api/v3/messages?"+q, "key.secret", ""), want)
 	}
 }
 

@@ -193,6 +193,9 @@ func TestMediaAuthorizationBinding(t *testing.T) {
 				a.legacy.cfg.APIKeys["key"] = key
 				status = 403
 			case "admin":
+				user := a.legacy.cfg.Users["7"]
+				user.Permissions = []string{"admin", "host"}
+				a.legacy.cfg.Users["7"] = user
 				key := a.legacy.cfg.APIKeys["key"]
 				key.Permissions = []string{"admin"}
 				a.legacy.cfg.APIKeys["key"] = key
@@ -373,7 +376,11 @@ func TestMediaPaginationAndFilters(t *testing.T) {
 		t.Fatal("empty page")
 	}
 	for _, q := range []string{"count=0", "count=501", "continue=-1", "count=1&count=2", "sort=title", "descending=1", "wat=1", "clipId=1", "unresolved=true", "apiKey=x", "count=%zz"} {
-		mediaWant(t, s, "GET", "/api/v3/clips?"+q, "", 400)
+		want := 400
+		if strings.Contains(q, "apiKey=") || strings.Contains(q, "%zz") {
+			want = 401
+		}
+		mediaWant(t, s, "GET", "/api/v3/clips?"+q, "", want)
 	}
 	mediaWant(t, s, "POST", "/api/v3/triggers", `{"text":"Case","clipId":"102"}`, 201)
 	for _, q := range []string{"text=Case&clipId=102&unresolved=false", "text=case", "text=", "unresolved=true"} {

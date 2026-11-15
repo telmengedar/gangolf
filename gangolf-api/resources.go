@@ -61,6 +61,8 @@ func resourceID(id string) (int64, bool) {
 }
 
 type identityContent struct {
+	Enabled       *bool  `json:"enabled,omitempty"`
+	Deleted       bool   `json:"deleted,omitempty"`
 	SchemaVersion int    `json:"schemaVersion"`
 	Service       string `json:"service"`
 	ServiceID     string `json:"serviceId,omitempty"`

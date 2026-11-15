@@ -242,7 +242,7 @@ func TestLoadConfig_MultipleProfilesSelectOnlyExplicitIDWithoutGrantBlending(t *
 			t.Fatal("selected profile blended grants")
 		}
 		status(t, request(t, s, "GET", "/api/v2/messages", "key.secret", ""), wantKeyStatus)
-		status(t, request(t, s, "GET", "/api/v2/messages?apiKey=key.secret", "", ""), wantKeyStatus)
+		status(t, request(t, s, "GET", "/api/v2/messages?apiKey=key.secret", "", ""), 401)
 		for _, issuer := range []string{"test-issuer", "other-issuer"} {
 			for _, user := range []string{"7", "8"} {
 				claims := jwt.MapClaims{"iss": issuer, "aud": cfg.Audience, "userId": user, "exp": s.now().Add(time.Hour).Unix()}

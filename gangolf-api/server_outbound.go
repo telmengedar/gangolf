@@ -66,6 +66,10 @@ func (s *server) createTwitchOutbound(ctx context.Context, w http.ResponseWriter
 		failure(w, 403, "forbidden")
 		return
 	}
+	if err := s.twitchChannelAllowed(ctx, cfg, p); err != nil {
+		failure(w, 403, "forbidden")
+		return
+	}
 	if s.twitch == nil || s.twitch.client == nil {
 		failure(w, 503, "delivery_unavailable")
 		return
@@ -107,6 +111,10 @@ func (s *server) createTwitchOutbound(ctx context.Context, w http.ResponseWriter
 	}
 	selected, ok := selectOutbound(current, s.graph.config, caller, input.Channel)
 	if !ok || !sameReceiver(selected, p) {
+		failure(w, 403, "forbidden")
+		return
+	}
+	if err := s.twitchChannelAllowed(ctx, current, selected); err != nil {
 		failure(w, 403, "forbidden")
 		return
 	}

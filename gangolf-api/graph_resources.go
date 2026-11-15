@@ -215,6 +215,10 @@ func (g *graph) queryResourceItem(ctx context.Context, kind, name string, owner,
 	var last int64
 	for {
 		q := url.Values{"rootNodeId": {strconv.FormatInt(g.root, 10)}, "type": {kind}, "fields": {"id,name,type,rootNodeId,ownerId,access,content,contentType,linkDetails"}, "sort": {"id"}, "descending": {"false"}, "count": {"500"}, "continue": {strconv.Itoa(offset)}}
+		if kind == "channel" {
+			q.Del("rootNodeId")
+			q.Set("fields", q.Get("fields")+",skipEmbedding")
+		}
 		if kind == authConfigType || kind == twitchConfigType || kind == "message" {
 			q.Set("fields", q.Get("fields")+",skipEmbedding")
 		}
@@ -241,7 +245,7 @@ func (g *graph) queryResourceItem(ctx context.Context, kind, name string, owner,
 		}
 		total = *page.Total
 		for _, n := range page.Result {
-			if n.ID <= last || id > 0 && n.ID != id || n.Type != kind || !g.privateNode(n, owner) || n.Links == nil || name != "" && n.Name != name || group > 0 && !exactMembership(n, group) {
+			if n.ID <= last || id > 0 && n.ID != id || n.Type != kind || !(kind == "channel" && g.validChannelNode(ctx, n, owner) || kind != "channel" && g.privateNode(n, owner)) || n.Links == nil || name != "" && n.Name != name || group > 0 && !exactMembership(n, group) {
 				return nil, errCorrupt
 			}
 			last = n.ID
@@ -391,10 +395,13 @@ func (g *graph) resolveIdentity(ctx context.Context, kind string, value identity
 
 func identityValue(n node, kind, service, key string) (identityContent, error) {
 	var v identityContent
-	if n.Content == nil || !strings.HasPrefix(n.ContentType, "application/json") || strictJSON([]byte(*n.Content), &v) != nil || v.SchemaVersion != 1 || v.Service != service || n.Name != identityName(kind, service, key) {
+	if n.Content == nil || !strings.HasPrefix(n.ContentType, "application/json") || strictJSON([]byte(*n.Content), &v) != nil || (v.SchemaVersion != 1 && !(kind == "channel" && v.SchemaVersion == 2)) || v.Service != service || n.Name != identityName(kind, service, key) {
 		return v, errCorrupt
 	}
 	if kind == "user" && (v.ServiceID != key || strings.TrimSpace(v.Name) == "" || v.Channel != "") || kind == "channel" && (v.Channel != key || v.ServiceID != "" || v.Name != "") {
+		return v, errCorrupt
+	}
+	if kind == "channel" && (v.SchemaVersion == 2 && v.Enabled == nil || v.SchemaVersion == 1 && (v.Enabled != nil || v.Deleted)) {
 		return v, errCorrupt
 	}
 	return v, nil
@@ -406,6 +413,10 @@ func (g *graph) readEntity(ctx context.Context, id int64, kind string, owner int
 		return node{}, errCorrupt
 	}
 	q := url.Values{"id": {strconv.FormatInt(id, 10)}, "rootNodeId": {strconv.FormatInt(g.root, 10)}, "linkedto": {strconv.FormatInt(group, 10)}, "type": {kind}, "fields": {"id,name,type,rootNodeId,ownerId,access,content,contentType,linkDetails"}, "count": {"2"}}
+	if kind == "channel" {
+		q.Del("rootNodeId")
+		q.Set("fields", q.Get("fields")+",skipEmbedding")
+	}
 	if kind == "message" {
 		q.Set("fields", q.Get("fields")+",skipEmbedding")
 	}
@@ -418,7 +429,7 @@ func (g *graph) readEntity(ctx context.Context, id int64, kind string, owner int
 		return node{}, errCorrupt
 	}
 	n := page.Result[0]
-	if n.ID != id || n.Type != kind || !g.privateNode(n, owner) || !exactMembership(n, group) {
+	if n.ID != id || n.Type != kind || !(kind == "channel" && g.validChannelNode(ctx, n, owner) || kind != "channel" && g.privateNode(n, owner)) || !exactMembership(n, group) {
 		return node{}, errCorrupt
 	}
 	if kind == "channel" {

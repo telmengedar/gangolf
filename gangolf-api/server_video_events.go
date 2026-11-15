@@ -71,22 +71,45 @@ func (s *server) videoEvent(ctx context.Context, w http.ResponseWriter, r *http.
 		failure(w, 503, "media_unavailable")
 		return
 	}
-	all, err := s.graph.messagesV3(ctx, cfg.serviceOwner)
+	sourceRows, err := s.graph.queryResourceItem(ctx, "message", "", cfg.serviceOwner, s.graph.group, id)
 	if err != nil {
 		storageFailure(w, err)
 		return
 	}
-	source, found := all[id]
-	if !found || source.Deleted {
+	if len(sourceRows) == 0 {
 		failure(w, 404, "not_found")
 		return
 	}
+	if len(sourceRows) != 1 {
+		storageFailure(w, errCorrupt)
+		return
+	}
+	sourceNode := sourceRows[0]
+	source, err := decodeMessage(sourceNode)
+	if err != nil || source.Deleted {
+		failure(w, 404, "not_found")
+		return
+	}
+	if err = s.graph.validateRelations(ctx, sourceNode, source, cfg.serviceOwner); err != nil {
+		storageFailure(w, err)
+		return
+	}
 	policy := s.policy(p, cfg)
-	if !policy.visible(source.Service, source.Channel, source.ChannelID) {
+	allowed, err := policy.allowed(ctx, source.Service, source.Channel, source.ChannelID, true)
+	if err != nil {
+		storageFailure(w, err)
+		return
+	}
+	if !allowed {
 		failure(w, 403, "forbidden")
 		return
 	}
-	if !p.admin() && !strings.EqualFold(source.Service, "Twitch") {
+	channel, err := policy.channel(ctx, source.Service, source.Channel, source.ChannelID)
+	if err != nil {
+		storageFailure(w, err)
+		return
+	}
+	if !p.admin() && channel != nil && channel.Root == s.graph.root && !strings.EqualFold(source.Service, "Twitch") {
 		failure(w, 403, "forbidden")
 		return
 	}

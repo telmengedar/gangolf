@@ -107,6 +107,9 @@ func (s *server) ingestTwitch(ctx context.Context, p twitchProfile, e twitchEven
 	if !ok || !sameReceiver(current, p) {
 		return 0, errUnavailable
 	}
+	if err := s.twitchChannelAllowed(ctx, cfg, current); err != nil {
+		return 0, err
+	}
 	raw, _ := json.Marshal(e)
 	checked, err := parseTwitchEvent(raw, e.publishedAt, p)
 	if err != nil {
