@@ -568,13 +568,12 @@ func (s *server) tokensHTTP(ctx context.Context, w http.ResponseWriter, r *http.
 				return
 			}
 			seen[channelID] = true
-			allowed, err := policy.allowed(ctx, "", "", channelID, true)
+			allowed, err := policy.scopedReadChannel(ctx, channelID, true)
 			if err != nil {
 				storageFailure(w, err)
 				return
 			}
-			n := policy.channels[channelID]
-			if !allowed || n == nil || n.Root == s.graph.root {
+			if !allowed {
 				failure(w, 403, "forbidden")
 				return
 			}
