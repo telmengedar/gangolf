@@ -78,14 +78,14 @@ func serve(handler *server, addr string) error {
 	if err != nil {
 		return err
 	}
-	listener, err := net.Listen("tcp", addr)
+	listener, err := listenTCP(addr)
 	if err != nil {
 		return errUnavailable
 	}
 	defer listener.Close()
 	var player net.Listener
 	if handler.player != nil {
-		player, err = net.Listen("tcp", handler.player.ListenAddr)
+		player, err = listenTCP(handler.player.ListenAddr)
 		if err != nil {
 			return errUnavailable
 		}
