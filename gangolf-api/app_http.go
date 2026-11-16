@@ -530,11 +530,11 @@ func (s *server) tokensHTTP(ctx context.Context, w http.ResponseWriter, r *http.
 		return
 	}
 	var input struct {
-		Name        *string    `json:"name"`
-		Scope       string     `json:"scope"`
-		ChannelIDs  []string   `json:"channelIds"`
-		Permissions []string   `json:"permissions"`
-		ExpiresAt   *time.Time `json:"expiresAt"`
+		Name        *string     `json:"name"`
+		Scope       string      `json:"scope"`
+		ChannelIDs  []string    `json:"channelIds"`
+		Permissions []string    `json:"permissions"`
+		ExpiresAt   tokenExpiry `json:"expiresAt"`
 	}
 	if !appBody(w, r, &input) {
 		return
@@ -589,24 +589,27 @@ func (s *server) tokensHTTP(ctx context.Context, w http.ResponseWriter, r *http.
 		}
 	}
 	now := s.now().UTC()
-	deadline := now.Add(maximum)
-	if p.ExpiresAt != nil && p.ExpiresAt.Before(deadline) {
-		deadline = *p.ExpiresAt
-	}
-	if input.ExpiresAt == nil {
-		value := now.Add(def)
-		if value.After(deadline) {
-			value = deadline
+	expires := input.ExpiresAt.value
+	if !input.ExpiresAt.present || expires != nil {
+		deadline := now.Add(maximum)
+		if p.ExpiresAt != nil && p.ExpiresAt.Before(deadline) {
+			deadline = *p.ExpiresAt
 		}
-		input.ExpiresAt = &value
+		if expires == nil {
+			value := now.Add(def)
+			if value.After(deadline) {
+				value = deadline
+			}
+			expires = &value
+		}
+		if !expires.After(now) || expires.After(deadline) {
+			failure(w, 400, "invalid_token")
+			return
+		}
+		utcExpiry := expires.UTC()
+		expires = &utcExpiry
 	}
-	if !input.ExpiresAt.After(now) || input.ExpiresAt.After(deadline) {
-		failure(w, 400, "invalid_token")
-		return
-	}
-	utcExpiry := input.ExpiresAt.UTC()
-	input.ExpiresAt = &utcExpiry
-	id, token, err := s.issueToken(ctx, cfg, userID, input.Name, input.Scope, input.ChannelIDs, input.Permissions, input.ExpiresAt)
+	id, token, err := s.issueToken(ctx, cfg, userID, input.Name, input.Scope, input.ChannelIDs, input.Permissions, expires)
 	if err != nil {
 		storageFailure(w, err)
 		return
