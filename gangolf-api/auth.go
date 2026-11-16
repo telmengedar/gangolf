@@ -20,11 +20,16 @@ import (
 )
 
 type grant struct {
-	Enabled     bool     `json:"enabled"`
-	Permissions []string `json:"permissions"`
+	Enabled       bool     `json:"enabled"`
+	ProfileNodeID string   `json:"profileNodeId,omitempty"`
+	ManagedOnly   bool     `json:"managedOnly,omitempty"`
+	Permissions   []string `json:"permissions"`
 }
 
 type keyGrant struct {
+	Name        *string    `json:"name,omitempty"`
+	Scope       string     `json:"scope,omitempty"`
+	ChannelIDs  []string   `json:"channelIds,omitempty"`
 	UserID      string     `json:"userId"`
 	Hash        []byte     `json:"hash"`
 	Enabled     bool       `json:"enabled"`
@@ -49,6 +54,21 @@ func (c *authConfig) valid() bool {
 	if c.SchemaVersion != 1 || c.Issuer == "" || c.Audience == "" || c.UserIDClaim == "" || c.Users == nil || c.APIKeys == nil || err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "https" && !(u.Scheme == "http" && (u.Hostname() == "127.0.0.1" || u.Hostname() == "localhost" || u.Hostname() == "::1"))) {
 		return false
 	}
+	bindings := map[string]bool{}
+	for id, u := range c.Users {
+		if u.ManagedOnly && u.ProfileNodeID == "" {
+			return false
+		}
+		if u.ProfileNodeID != "" {
+			if _, ok := resourceID(id); !ok {
+				return false
+			}
+			if _, ok := resourceID(u.ProfileNodeID); !ok || bindings[u.ProfileNodeID] {
+				return false
+			}
+			bindings[u.ProfileNodeID] = true
+		}
+	}
 	for _, k := range c.APIKeys {
 		if len(k.Hash) != sha256.Size || k.UserID == "" {
 			return false
@@ -64,23 +84,6 @@ func hasHost(permissions []string) bool {
 		}
 	}
 	return false
-}
-
-func credential(r *http.Request) (string, bool) {
-	if headers, ok := r.Header["Authorization"]; ok {
-		if len(headers) != 1 {
-			return "", false
-		}
-		parts := strings.Fields(headers[0])
-		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-			return "", false
-		}
-		return parts[1], false
-	}
-	if r.Method == http.MethodGet {
-		return r.URL.Query().Get("apiKey"), true
-	}
-	return "", false
 }
 
 func (s *server) authorize(ctx context.Context, r *http.Request, c *authConfig, token string, queryKey bool) (principal, int) {
@@ -121,7 +124,7 @@ func (s *server) authorize(ctx context.Context, r *http.Request, c *authConfig, 
 		if !ok || !u.Enabled || !hasHost(u.Permissions) {
 			return principal{}, http.StatusForbidden
 		}
-		return principal{UserID: strconv.FormatInt(n, 10), Permissions: u.Permissions}, 0
+		return s.boundPrincipal(ctx, c, principal{UserID: strconv.FormatInt(n, 10), Permissions: u.Permissions, ManagedOnly: u.ManagedOnly, ExpiresAt: &expires.Time})
 	}
 	id, secret, ok := strings.Cut(token, ".")
 	if !ok || id == "" || secret == "" {
@@ -137,10 +140,24 @@ func (s *server) authorize(ctx context.Context, r *http.Request, c *authConfig, 
 	if !ok || !user.Enabled {
 		return principal{}, http.StatusUnauthorized
 	}
-	if !hasHost(k.Permissions) {
+	permissions := effectivePermissions(k.Permissions, user.Permissions)
+	if !hasHost(permissions) {
 		return principal{}, http.StatusForbidden
 	}
-	return principal{UserID: k.UserID, Permissions: k.Permissions}, 0
+	scope := k.Scope
+	if scope == "" {
+		scope = "api"
+	}
+	if scope != "api" && scope != "channel-read" {
+		return principal{}, http.StatusForbidden
+	}
+	if queryKey && (scope != "channel-read" && (k.Scope != "" || permissionsContain(permissions, "admin") || r.Method != http.MethodGet || !(r.URL.Path == "/api/v2/messages" || r.URL.Path == "/api/v3/messages" || strings.HasPrefix(r.URL.Path, "/api/v3/messages/")))) {
+		return principal{}, http.StatusUnauthorized
+	}
+	if scope == "channel-read" && (r.Method != http.MethodGet || !(r.URL.Path == "/api/v3/events" || r.URL.Path == "/api/v3/messages" || strings.HasPrefix(r.URL.Path, "/api/v3/messages/") || r.URL.Path == "/api/v3/channels" || strings.HasPrefix(r.URL.Path, "/api/v3/channels/"))) {
+		return principal{}, http.StatusForbidden
+	}
+	return s.boundPrincipal(ctx, c, principal{UserID: k.UserID, Permissions: permissions, Scope: scope, ChannelIDs: k.ChannelIDs, KeyID: id, ManagedOnly: user.ManagedOnly, ExpiresAt: k.ExpiresAt})
 }
 
 func (s *server) jwtKey(ctx context.Context, target, kid string) (*rsa.PublicKey, error) {
@@ -184,4 +201,45 @@ func (s *server) jwtKey(ctx context.Context, target, kid string) (*rsa.PublicKey
 		return nil, errCorrupt
 	}
 	return key, nil
+}
+
+func permissionsContain(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func effectivePermissions(key, user []string) []string {
+	result := []string{}
+	for _, value := range key {
+		if value == "host" && hasHost(user) || value == "admin" && permissionsContain(user, "admin") {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func (s *server) boundPrincipal(ctx context.Context, cfg *authConfig, p principal) (principal, int) {
+	user := cfg.Users[p.UserID]
+	if user.ProfileNodeID == "" {
+		if user.ManagedOnly {
+			return principal{}, http.StatusServiceUnavailable
+		}
+		return p, 0
+	}
+	nodeID, ok := resourceID(user.ProfileNodeID)
+	if !ok {
+		return principal{}, http.StatusServiceUnavailable
+	}
+	_, profile, err := s.graph.appProfile(ctx, nodeID, cfg.serviceOwner)
+	if err != nil || profile.UserID != p.UserID {
+		return principal{}, http.StatusServiceUnavailable
+	}
+	if profile.Deleted {
+		return principal{}, http.StatusUnauthorized
+	}
+	return p, 0
 }

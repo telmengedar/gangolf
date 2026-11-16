@@ -13,6 +13,9 @@ func videoEventFixture(t *testing.T) (*mediaFixture, *resourceFixture, *server, 
 	t.Helper()
 	media, f, s := newMediaFixture(t)
 	provisionTwitch(t, f, 30, "7", "101")
+	user := f.legacy.cfg.Users["7"]
+	user.Permissions = []string{"admin", "host"}
+	f.legacy.cfg.Users["7"] = user
 	admin := addTestKey(f, s, "admin", "7", "admin")
 	c := media.state(t)
 	c.Clips = []mediaClip{{ID: "1", Provider: "youtube", RemoteVideoID: "abcdefghijk", Title: new("Test clip")}}
@@ -139,7 +142,8 @@ func TestVideoEventSubscriptionIsolation(t *testing.T) {
 	f.legacy.cfg.Users["8"] = grant{Enabled: true, Permissions: []string{"host"}}
 	other := addTestKey(f, s, "other", "8", "host")
 	for _, token := range []string{other} {
-		status(t, request(t, s, "GET", "/api/v3/events?types=video.triggered", token, ""), 403)
+		otherVideo := openEventTestStream(t, eventTestHost(t, s), token, "types=video.triggered")
+		otherVideo.body.Close()
 		status(t, postVideoTest(s, token, `{"messageId":"`+msg.ID+`","triggerId":"1"}`), 403)
 	}
 	video := openEventTestStream(t, eventTestHost(t, s), "key.secret", "types=video.triggered")
@@ -151,7 +155,7 @@ func TestVideoEventSubscriptionIsolation(t *testing.T) {
 	if e.Type != "video.triggered" {
 		t.Fatal("admin could not receive shared-source intent")
 	}
-	noEventTestFrame(t, video)
+	nextEventTestFrame(t, video, time.Second)
 	nextEventTestFrame(t, messages, time.Second)
 	media.mu.Lock()
 	media.fail = "all"

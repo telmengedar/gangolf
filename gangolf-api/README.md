@@ -98,7 +98,7 @@ The catalog is limited to 8 MiB. Each accepted mutation replaces it once under a
 
 ## Live events
 
-`GET /api/v3/events` opens a live SSE subscription. Use the existing bearer API key or JWT in the Authorization header. Query credentials are rejected, including when a bearer is present. Fetch supports this header; native `EventSource` does not. Consume through an authorized same-origin route. The current deployment listens on host loopback; this source change does not configure browser reachability, CORS, TLS, or proxy buffering.
+`GET /api/v3/events` opens a live SSE subscription. Prefer `Authorization: Bearer …` with an API key or JWT. URL-only applications can use an explicitly issued `channel-read` token as the single `apiKey` query parameter; it is restricted to owned channel IDs. Do not combine header and query credentials. Native `EventSource` can use that URL. Consume through an authorized same-origin route. The current deployment listens on host loopback; this source change does not configure browser reachability, CORS, TLS, or proxy buffering.
 
 ```sh
 curl --no-buffer --get "$GANGOLF_API/api/v3/events" \
@@ -109,7 +109,7 @@ curl --no-buffer --get "$GANGOLF_API/api/v3/events" \
   --data-urlencode 'channel=101'
 ```
 
-`types` is required: one or both of `message.created` and `video.triggered`, comma-separated, without duplicates. Optional `service` and `channel` are exact, case-sensitive filters; `channel` requires `service`. Types are ORed, service/channel are ANDed. Omit service/channel to receive all currently readable events. Unknown, repeated, empty, malformed, or unsupported parameters return 400 `invalid_filter`; decoded service/channel have a 256-character limit and the query a 4096-byte limit. Filters never grant permission.
+`types` is required: one or both of `message.created` and `video.triggered`, comma-separated, without duplicates. Optional `service` and `channel` are exact, case-sensitive filters; `channel` requires `service`. Types are ORed, service/channel are ANDed. Omit service/channel to receive all currently readable events. Unknown, repeated, empty, malformed, or unsupported parameters return 400 `invalid_filter`; decoded service/channel have a 256-character limit and the query an 8192-byte limit. Filters never grant permission.
 
 The first flushed frame is:
 
@@ -123,7 +123,7 @@ Data frames have `event: message.created` or `event: video.triggered` and one co
 
 Message data is either `{resourceVersion:3,message:<existing v3 message resource>}` or `{resourceVersion:2,batchId,index,message:<existing v2 message>}`. Legacy `index` is the zero-based batch position. Actual accepted chunks, timestamps, source and delivery fields are preserved. Events cover successful local v3 creation, legacy batches, new Twitch inbound messages, and the first confirmed outbound reservation. Outbound creation honestly has `delivery.state:"unknown"` because the event precedes sending. Retries/replays, terminal delivery changes, PATCH, DELETE, history reads and imports do not emit a second creation event.
 
-Each data frame and every 15-second heartbeat reloads authorization. API keys retain their own effective permissions even if their user is admin. Existing message-read rules apply: Twitch messages require the current tenant/broadcaster/channel association or effective admin; non-Twitch messages remain shared among authorized hosts. Disabled Twitch profiles retain their existing read semantics. Video subscriptions additionally require available current media storage and its configured tenant or effective admin. A nonadmin never receives video intents derived from shared non-Twitch messages. Revocation, expiry, unavailable auth/media storage, disconnect, overflow, ambiguous message creation or shutdown ends the stream; idle revocation is detected on the next heartbeat plus its bounded 10-second authorization operation. Message-only streams do not depend on media availability.
+Each data frame and every 15-second heartbeat reloads authorization. Key permissions are bounded by the current user grant and never inherit admin from the user. Managed channel events require current ownership or effective admin and an enabled, nondeleted channel. New users cannot read unowned legacy channels. Existing legacy grants retain shared non-Twitch and exact Twitch-profile history rules; disabled Twitch profiles retain historical visibility. Video subscriptions require available current media storage and the same source-channel authorization; receiving video does not grant catalog access. Revocation, expiry, unavailable auth/media storage, disconnect, overflow, ambiguous message creation or shutdown ends the stream; idle revocation is detected on the next heartbeat plus its bounded 10-second authorization operation. Message-only streams do not depend on media availability.
 
 There are 16 streams total and 4 per user across all their keys. A stream can queue 64 events and at most 8 MiB of encoded frames; an individual frame is limited to 8 MiB. Matching slow subscribers are disconnected when they exceed either queue limit; producers and other subscribers continue. Each write/flush has a 5-second deadline. Heartbeat comments keep the connection active. Unsupported flush/deadline writers return 503 `stream_unavailable`; exhausted stream slots return 429 `stream_limit`. Incompatible Accept returns 406; request bodies return 400; non-GET methods return 405. Existing 401/403/503 authorization/storage errors use the normal JSON envelope before streaming begins. Failures after headers normally close the connection.
 
@@ -192,6 +192,45 @@ curl "$GANGOLF_API/api/v3/video-events" \
   --data '{"messageId":"123","triggerId":"9"}'
 ```
 
-The caller must be the configured media tenant or effective admin, and the source must be a visible nondeleted v3 message with validated relations. Nonadmins additionally need a Twitch source belonging to the catalog tenant through its current profile association; shared non-Twitch records have no tenant attribution. The current trigger must resolve to an existing clip. The server derives routing and `{messageId,trigger,clip}` from current stored DTOs, then returns 200 with the emitted envelope, even with no subscribers. There is no durable item/Location or event GET history, no storage writes and no automatic text-match requirement. A repeated POST creates a fresh intent. An ambiguous response must not be blindly retried because duplicate intents are possible.
+The caller must be the configured media tenant or effective admin, and the source must be a visible nondeleted v3 message with validated relations. Nonadmins need their own enabled managed source channel, or an existing exact legacy Twitch-profile association; catalog ownership alone never grants another user’s channel. Effective admin can publish for a new user’s owned local channel. The current trigger must resolve to an existing clip. The server derives routing and `{messageId,trigger,clip}` from current stored DTOs, then returns 200 with the emitted envelope, even with no subscribers. There is no durable item/Location or event GET history, no storage writes and no automatic text-match requirement. A repeated POST creates a fresh intent. An ambiguous response must not be blindly retried because duplicate intents are possible.
 
 Missing message/trigger returns 404 `not_found`, unauthorized source 403 `forbidden`, unresolved clip 409 `unresolved_trigger`, and absent/unavailable media 503 `media_unavailable`. Existing bearer authentication failures apply. Other methods return 405 `Allow: POST`. Reuse the ordinary clips/triggers API to manage the catalog; archives are never consulted by event production.
+
+
+## Users, channels and tokens
+
+| Resource | Collection | Item |
+| --- | --- | --- |
+| Users | `GET`, `POST /api/v3/users` | `GET`, `PUT`, `DELETE /api/v3/users/{id}` |
+| User tokens | `GET`, `POST /api/v3/users/{id}/tokens` | `GET`, `DELETE /api/v3/tokens/{id}` |
+| Channels | `GET`, `POST /api/v3/channels` | `GET`, `PUT`, `DELETE /api/v3/channels/{id}` |
+
+`current` can replace the user ID for self reads, name updates and token management. Administrative user creation/listing/role changes/deletion require an effective admin credential. Ordinary users can read themselves and replace their own name while preserving `enabled` and `permissions`. PUT accepts the full GET resource. The final enabled admin cannot be disabled, deleted or downgraded. Deleting a user disables authentication and removes its keys; existing message references remain.
+
+Create a user with `{"name":"Alice","enabled":true,"permissions":["host"]}`. The response contains server-assigned `id`, `name`, `enabled` and `permissions`. Existing users without a profile initially have `name:null`; a self PUT or first channel POST explicitly creates their private profile without changing existing permissions or tokens.
+
+Create a channel with `{"service":"Local","channel":"alice"}`. It belongs to the authenticated user; an admin can supply an enabled target `ownerUserId`. Responses include `id`, `service`, `channel`, derived `ownerUserId`, `enabled` and `deleted`. Ownership and service/channel identity cannot change. PUT can change only `enabled`. DELETE is terminal: the canonical service/channel identity stays reserved and cannot be reused. Disabled/deleted channels retain owner-readable history but reject new messages and live events. Register channels before posting as a newly created user.
+
+Channel registration creates an application permission resource. Registering a Twitch channel does not join Twitch, acquire OAuth, enable a profile or start a receiver. Existing operator-managed profile and credential configuration remains necessary for upstream Twitch traffic. That profile’s tenant and canonical channel must agree with the registered owner. Legacy channels cannot be claimed or rehomed through these endpoints.
+
+New lists use `count` (default100,max500), `continue`, `sort=id` and `descending=true|false`. Users and tokens additionally filter by `enabled`; channels filter by exact `service`, `channel` and `enabled`. Filters combine with AND. Responses use `{result,total,continue}`; unknown/repeated filters are rejected.
+
+Issue a normal token with POST `/api/v3/users/current/tokens` and `{"name":"Desktop","scope":"api","permissions":["host"]}`. The successful201 response includes `token` exactly once; later GET/list responses contain only metadata. Tokens retain the existing `id.secret` format, but only a keyed hash is stored. API tokens use headers and default to30days, with a365day maximum. Their permissions are bounded by both issuer and target user. Revocation is DELETE on the token item, including the current token; user disable/delete and role changes apply on each fresh authorization.
+
+For URL-only clients issue `{"name":"Overlay","scope":"channel-read","channelIds":["<owned-channel-id>"]}`. These host-only tokens default to24hours with a30day maximum and permit only GET v3 channels/messages/events for the selected owned channels. Both event kinds use that restriction. Optional `expiresAt` must be future UTC and within the scope limit; expiry is also capped by a finite issuer credential. Read tokens cannot manage users/tokens, write messages, access the catalog or publish video intents.
+
+Use `apiKey=<URL-encoded-channel-read-token>` only on those GET routes. Header+query, repeated/encoded duplicate query credentials, malformed escapes, query JWTs and admin query credentials are rejected. Existing pre-feature nonadmin keys retain message-GET query compatibility. Tokens never appear in Locations, errors or event frames. Responses include `Cache-Control:no-store` and `Referrer-Policy:no-referrer`; external browser/proxy logs can still retain URLs, so use short-lived read scopes and headers whenever possible.
+
+### Initial administrator
+
+Normal startup never creates or elevates an admin. During an explicitly authorized offline writer-quiet window, use the existing primary graph environment and pepper:
+
+```sh
+./gangolf-api bootstrap-admin --name Administrator --output /private/new-admin.key
+```
+
+The command refuses if an enabled app admin already exists. It creates a separate managed app user and admin token, preserving existing users, keys and storage identities. It opens no listener or receiver. Use a private output directory under trusted operator custody. The output path must not exist; the command creates a regular0600 file, writes and syncs the complete token, closes it and syncs its parent directory before submitting the security activation. Before activation and before reporting success, it verifies that the requested path still names the original regular0600, single-linked, process-owned file containing the saved token. Stdout contains only user ID, key ID and file path after successful independent readback and that final custody check. These bounded checks cannot prevent later deletion by the same operator/UID.
+
+If activation or confirmation is uncertain, the command fails and preserves that exact protected file. Do not delete it or blindly rerun bootstrap: the write may have committed. Recover with the saved token through the normal header-authenticated `GET /api/v3/users/current`, or have the operator inspect the authoritative key/user/profile binding offline. Inconclusive recovery never authorizes reissuance. A fresh exclusive output path may be used only after confirming no admin or intended key was activated. The command does not authorize a production provisioning window by itself.
+
+The API serializes local security mutations and confirms complete config writes by readback. Cross-node changes are not distributed transactions; failures can leave non-authoritative staging profiles. A `write_outcome_unknown` response is not success: reconcile by GET before retrying creation. Run exactly one API writer.

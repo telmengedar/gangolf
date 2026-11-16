@@ -443,7 +443,7 @@ func TestTwitchInboundAndLegacySchemasRemainSeparateAndPrivate(t *testing.T) {
 		}
 	}
 	for _, q := range f.queries {
-		if q.Get("rootNodeId") != "10" {
+		if q.Get("type") != "channel" && q.Get("rootNodeId") != "10" || q.Get("type") == "channel" && q.Get("rootNodeId") != "" {
 			t.Fatal("unscoped query")
 		}
 		if q.Get("linkedto") == "" && q.Get("name") == "" {

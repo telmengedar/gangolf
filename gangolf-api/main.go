@@ -49,6 +49,9 @@ func bootstrap() (*server, string, error) {
 }
 
 func run() error {
+	if len(os.Args) > 1 && os.Args[1] == "bootstrap-admin" {
+		return bootstrapAdminCommand(os.Args[2:])
+	}
 	if len(os.Args) > 1 && os.Args[1] == "seed-media" {
 		return seedMediaCommand(os.Args[2:])
 	}

@@ -88,6 +88,28 @@ func (f *resourceFixture) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if r.Method == "POST" && r.URL.Path == "/api/nodes/12/content" {
+		if f.inject(w, "auth-write") {
+			return
+		}
+		var cfg authConfig
+		if json.NewDecoder(r.Body).Decode(&cfg) != nil {
+			w.WriteHeader(400)
+			return
+		}
+		f.legacy.mu.Lock()
+		f.legacy.cfg = cfg
+		f.legacy.mu.Unlock()
+		f.writes++
+		if f.fail == "auth-readback" {
+			f.legacy.corruptConfig = true
+		}
+		if f.inject(w, "auth-written") {
+			return
+		}
+		w.WriteHeader(200)
+		return
+	}
 	if r.Method == "GET" && r.URL.Path == "/api/nodes/12" {
 		n := node{ID: 12, Type: "config", Root: 10, Owner: 20, Access: json.RawMessage(`"None"`)}
 		if f.corrupt != nil {
@@ -114,7 +136,7 @@ func (f *resourceFixture) serve(w http.ResponseWriter, r *http.Request) {
 			Access        *int   `json:"access"`
 			SkipEmbedding bool   `json:"skipEmbedding"`
 		}
-		if json.NewDecoder(r.Body).Decode(&n) != nil || n.Root != 10 || n.Access == nil || *n.Access != 0 || !n.SkipEmbedding {
+		if json.NewDecoder(r.Body).Decode(&n) != nil || (n.Root != 10 && f.nodes[n.Root].Type != "gangolf-user") || n.Access == nil || *n.Access != 0 || !n.SkipEmbedding {
 			w.WriteHeader(400)
 			return
 		}
@@ -153,7 +175,7 @@ func (f *resourceFixture) serve(w http.ResponseWriter, r *http.Request) {
 				var tuple []string
 				integrity = strings.HasPrefix(q.Get("name"), prefix) && err == nil && json.Unmarshal(data, &tuple) == nil && (len(tuple) == 2 && prefix != "gangolf-twitch-outbound:" || len(tuple) == 3 && prefix == "gangolf-twitch-outbound:")
 			}
-			if len(q["rootNodeId"]) != 1 || q.Get("rootNodeId") != "10" || len(q["type"]) != 1 || (!integrity && (len(q["linkedto"]) != 1 || q.Get("linkedto") != group)) {
+			if (kind != "channel" && (len(q["rootNodeId"]) != 1 || q.Get("rootNodeId") != "10")) || (kind == "channel" && q.Get("rootNodeId") != "" && q.Get("rootNodeId") != "10") || len(q["type"]) != 1 || (!integrity && (len(q["linkedto"]) != 1 || q.Get("linkedto") != group)) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}

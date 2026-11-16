@@ -83,9 +83,9 @@ func TestMalformedListQueryRejectsInsteadOfReturningStoredMessages(t *testing.T)
 					rawQuery += "&apiKey=key.secret"
 				}
 				w := request(t, s, "GET", "/api/v2/messages?"+rawQuery, token, "")
-				status(t, w, 400)
+				status(t, w, 401)
 				var failure map[string]string
-				if json.Unmarshal(w.Body.Bytes(), &failure) != nil || failure["code"] != "invalid_filter" || strings.Contains(w.Body.String(), "Distinct Speaker") {
+				if json.Unmarshal(w.Body.Bytes(), &failure) != nil || failure["code"] != "unauthorized" || strings.Contains(w.Body.String(), "Distinct Speaker") {
 					t.Fatalf("malformed query did not return sanitized filter error: %s", w.Body.String())
 				}
 				if f.writes != 3 || f.uploads != 1 {

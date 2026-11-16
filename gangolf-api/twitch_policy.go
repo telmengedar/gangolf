@@ -5,11 +5,17 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type principal struct {
 	UserID      string
 	Permissions []string
+	Scope       string
+	ChannelIDs  []string
+	KeyID       string
+	ManagedOnly bool
+	ExpiresAt   *time.Time
 }
 
 func (p principal) admin() bool {
@@ -25,10 +31,21 @@ type messagePolicy struct {
 	principal principal
 	authID    string
 	profiles  []twitchProfile
+	cfg       *authConfig
+	graph     *graph
+	channels  map[string]*node
+	owners    map[int64]string
 }
 
 func (s *server) policy(p principal, cfg *authConfig) messagePolicy {
-	return messagePolicy{principal: p, authID: strconv.FormatInt(s.graph.config, 10), profiles: cfg.twitch}
+	owners := make(map[int64]string)
+	for id, user := range cfg.Users {
+		if user.ProfileNodeID != "" {
+			nodeID, _ := resourceID(user.ProfileNodeID)
+			owners[nodeID] = id
+		}
+	}
+	return messagePolicy{principal: p, authID: strconv.FormatInt(s.graph.config, 10), profiles: cfg.twitch, cfg: cfg, graph: s.graph, channels: make(map[string]*node), owners: owners}
 }
 
 func (p messagePolicy) visible(service, channel, channelID string) bool {
@@ -45,7 +62,7 @@ func (p messagePolicy) visible(service, channel, channelID string) bool {
 
 func (p messagePolicy) visibleV3(ctx context.Context, g *graph, m messageContent, owner int64) (bool, error) {
 	if !m.Deleted {
-		return p.visible(m.Service, m.Channel, m.ChannelID), nil
+		return p.allowed(ctx, m.Service, m.Channel, m.ChannelID, false)
 	}
 	id, _ := resourceID(m.ChannelID)
 	n, err := g.readEntity(ctx, id, "channel", owner)
@@ -56,7 +73,7 @@ func (p messagePolicy) visibleV3(ctx context.Context, g *graph, m messageContent
 	if n.Content == nil || strictJSON([]byte(*n.Content), &identity) != nil {
 		return false, errCorrupt
 	}
-	return p.visible(identity.Service, identity.Channel, m.ChannelID), nil
+	return p.allowed(ctx, identity.Service, identity.Channel, m.ChannelID, false)
 }
 
 func (s *server) twitchChannels(ctx context.Context, w http.ResponseWriter, r *http.Request) {
@@ -74,6 +91,11 @@ func (s *server) twitchChannels(ctx context.Context, w http.ResponseWriter, r *h
 		failure(w, 400, "invalid_filter")
 		return
 	}
+	if err := lockResources(ctx); err != nil {
+		storageFailure(w, err)
+		return
+	}
+	defer resourceLock.Unlock()
 	cfg, err := s.graph.loadConfig(ctx)
 	if err != nil {
 		storageFailure(w, err)

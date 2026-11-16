@@ -112,6 +112,10 @@ func TestIdentityQueries_CanonicalThenIntegrity(t *testing.T) {
 						q := r.URL.Query()
 						tag := "C"
 						expected := url.Values{"rootNodeId": {"10"}, "linkedto": {strconv.FormatInt(group, 10)}, "type": {kind}, "name": {name}, "fields": {"id,name,type,rootNodeId,ownerId,access,content,contentType,linkDetails"}, "sort": {"id"}, "descending": {"false"}, "count": {"500"}, "continue": {"0"}}
+						if kind == "channel" {
+							expected.Del("rootNodeId")
+							expected.Set("fields", expected.Get("fields")+",skipEmbedding")
+						}
 						if _, present := q["linkedto"]; !present {
 							tag = "I"
 							delete(expected, "linkedto")
@@ -167,7 +171,11 @@ func TestIdentityQueries_ReadsCanonicalOnly(t *testing.T) {
 			group := map[string]string{"user": "13", "channel": "14", "message": "11"}[q.Get("type")]
 			if group != "" {
 				seen++
-				if len(q["linkedto"]) != 1 || q.Get("linkedto") != group || q.Get("rootNodeId") != "10" {
+				if q.Get("type") == "channel" {
+					if q.Get("rootNodeId") != "" || (q.Get("linkedto") != group && q.Get("name") == "") {
+						t.Errorf("unbounded channel read: %s", q.Encode())
+					}
+				} else if len(q["linkedto"]) != 1 || q.Get("linkedto") != group || q.Get("rootNodeId") != "10" {
 					t.Errorf("read escaped C: %s", q.Encode())
 				}
 			}
@@ -548,7 +556,7 @@ func TestIdentityQueries_ProjectAndKeyIsolation(t *testing.T) {
 				}
 			}
 			for _, q := range f.queries {
-				if q.Get("rootNodeId") != "10" || q.Get("type") != kind || q.Get("id") == "" && len(q["name"]) != 1 {
+				if (kind != "channel" && q.Get("rootNodeId") != "10" || kind == "channel" && q.Get("rootNodeId") != "") || q.Get("type") != kind || q.Get("id") == "" && len(q["name"]) != 1 {
 					t.Fatalf("query escaped key scope: %s", q.Encode())
 				}
 			}

@@ -127,6 +127,10 @@ func (f *graphFixture) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/api/nodes" && r.Method == "GET" {
 		q := r.URL.Query()
+		if q.Get("type") == "channel" {
+			respond(w, 200, graphPage{Result: []node{}, Total: 0})
+			return
+		}
 		if q.Get("type") == twitchConfigType {
 			if q.Get("rootNodeId") != "10" || q.Get("linkedto") != "15" {
 				w.WriteHeader(400)

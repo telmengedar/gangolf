@@ -56,6 +56,11 @@ func (s *server) mediaHTTP(ctx context.Context, w http.ResponseWriter, r *http.R
 		failure(w, 401, "unauthorized")
 		return
 	}
+	if err := lockResources(ctx); err != nil {
+		storageFailure(w, err)
+		return
+	}
+	defer resourceLock.Unlock()
 	cfg, err := s.graph.loadConfig(ctx)
 	if err != nil {
 		storageFailure(w, err)
