@@ -46,16 +46,23 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             self.send_header('Cache-Control', 'no-store')
             self.end_headers()
             try:
+                for event in state.get('before_ready', []):
+                    self.frame('message.created', event)
                 self.frame('stream.ready', {'schemaVersion': 1, 'replay': False, 'resyncRequired': True})
                 if state.get('malformed'):
                     self.wfile.write(b'event: message.created\ndata: not-json\n\n')
                     self.wfile.flush()
-                for event in state.get('events', []):
-                    self.frame('message.created', event)
                 if state.get('disconnect'):
                     self.close_connection = True
                     return
+                index = 0
                 while not state.get('shutdown'):
+                    if state.pop('reset', False):
+                        self.frame('stream.reset', {'schemaVersion': 1})
+                    while index < len(state.get('events', [])):
+                        event = state['events'][index]
+                        index += 1
+                        self.frame('message.created', event)
                     if state.get('disconnect_first') and state['streams'] == 1:
                         time.sleep(.5)
                         self.close_connection = True
@@ -97,6 +104,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Referrer-Policy', 'no-referrer')
         self.send_header('Cache-Control', 'no-store')
+        self.send_header('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'")
         self.end_headers()
         try:
             self.wfile.write(body)
@@ -158,29 +166,40 @@ class BrowserTests(unittest.TestCase):
 
     def setUp(self):
         global state
-        self.command('/session/' + self.session + '/url', {'url': 'about:blank'})
+        if CHROMIUM:
+            self.page.close()
+            type(self).page = self.browser.new_page()
+        else:
+            self.command('/session/' + self.session + '/url', {'url': 'about:blank'})
         state['shutdown'] = True
         state = {'history': [], 'events': []}
 
     def open_chat(self, options=''):
         self.command('/session/' + self.session + '/url', {'url': self.origin + '/overlays/chat?apiKey=' + FIXTURE_KEY + options})
 
-    def test_history_live_race_deduplicates_and_labels_services(self):
-        state['history'] = [message(2, 'second', service='youtube'), message(1)]
-        state['events'] = [envelope(1, message(2, 'second', service='youtube')), envelope(2, message(3, body='Grüße 👋'))]
+    def test_live_only_ignores_existing_history_and_displays_new_event(self):
+        state['history'] = [message(1, body='Historical row must not display')]
+        state['events'] = [envelope(2, message(2, body='New live row'))]
         self.open_chat()
-        self.wait_for("document.querySelectorAll('.message').length === 3")
-        self.assertEqual(self.evaluate("return [...document.querySelectorAll('.source')].map(e=>e.textContent)"), ['twitch / main', 'youtube / second', 'twitch / main'])
-        self.assertIn('Grüße 👋', self.evaluate('return document.body.textContent'))
-        self.assertEqual(state['history_calls'], 1)
-        self.assertEqual(state['streams'], 1)
+        self.wait_for("document.body.textContent.includes('New live row')")
+        self.assertEqual(self.evaluate("return document.querySelectorAll('.message').length"), 1)
+        self.assertNotIn('Historical row must not display', self.evaluate('return document.body.textContent'))
+        self.assertEqual(state.get('history_calls', 0), 0)
+
+    def test_two_services_and_split_utf8_frames_keep_channel_cues(self):
+        state['events'] = [envelope(1, message(1)), envelope(2, message(2, 'second', 'Grüße', 'youtube'))]
+        self.open_chat()
+        self.wait_for("document.querySelectorAll('.message').length === 2")
+        self.assertEqual(self.evaluate("return [...document.querySelectorAll('.source')].map(e=>e.textContent)"), ['twitch / main', 'youtube / second'])
+        self.assertIn('Grüße', self.evaluate('return document.body.textContent'))
+        self.assertEqual(state.get('history_calls', 0), 0)
 
     def test_text_is_literal_bounded_and_creates_no_remote_elements(self):
         attack = '<img src="https://example.invalid/leak" onerror="window.attacked=true">'
         item = message(1, attack, attack + '\n' + '𐐀' * 3000)
         item['user']['name'] = attack
         item['chunks'].append({'type': 1, 'code': '<script>bad()</script>'})
-        state['history'] = [item]
+        state['events'] = [envelope(1, item)]
         self.open_chat()
         self.wait_for("document.querySelectorAll('.message').length === 1")
         self.assertIn(attack, self.evaluate('return document.body.textContent'))
@@ -188,19 +207,17 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(self.evaluate("return Array.from(document.querySelector('.content').textContent).length"), 2048)
         self.assertFalse(self.evaluate('return Boolean(window.attacked)'))
 
-    def test_message_bound_and_bearer_only_requests(self):
+    def test_message_bound_and_bearer_only_single_stream(self):
         state['events'] = [envelope(i, message(i)) for i in range(1, 76)]
         self.open_chat('&service=twitch&channel=main')
         self.wait_for("document.querySelectorAll('.message').length === 50")
-        self.assertEqual(self.evaluate("return document.querySelectorAll('.message').length"), 50)
         api_requests = [request for request in state['requests'] if request[0].startswith('/api/')]
-        self.assertEqual(len(api_requests), 2)
-        for _, query, auth, referrer in api_requests:
-            self.assertEqual(auth, 'Bearer ' + FIXTURE_KEY)
-            self.assertNotIn('apiKey', query)
-            self.assertEqual(query['service'], ['twitch'])
-            self.assertEqual(query['channel'], ['main'])
-            self.assertIsNone(referrer)
+        self.assertEqual(len(api_requests), 1)
+        path, query, auth, referrer = api_requests[0]
+        self.assertEqual(path, '/api/v3/events')
+        self.assertEqual(auth, 'Bearer ' + FIXTURE_KEY)
+        self.assertEqual(query, {'service': ['twitch'], 'channel': ['main'], 'types': ['message.created']})
+        self.assertIsNone(referrer)
         self.assertEqual(self.evaluate('return localStorage.length + sessionStorage.length'), 0)
 
     def test_unauthorized_stream_stops_without_retry_or_key_echo(self):
@@ -212,75 +229,137 @@ class BrowserTests(unittest.TestCase):
         self.assertNotIn(FIXTURE_KEY, self.evaluate('return document.documentElement.outerHTML'))
         self.assertEqual(self.evaluate("return document.querySelectorAll('.message').length"), 0)
 
-    def test_unauthorized_history_also_stops(self):
-        state['history_error'] = 403
-        self.open_chat()
-        self.wait_for("document.getElementById('status').textContent.includes('Key invalid')")
-        time.sleep(1.4)
-        self.assertEqual(state['streams'], 1)
-
     def test_invalid_query_never_opens_api(self):
         self.open_chat('&channel=main')
         self.wait_for("document.getElementById('status').textContent.includes('required')")
         self.assertFalse(any(request[0].startswith('/api/') for request in state['requests']))
 
     def test_server_bounded_long_query_is_not_rejected_by_client(self):
-        state['history'] = [message(1)]
+        state['events'] = [envelope(1, message(1))]
         self.command('/session/' + self.session + '/url', {'url': self.origin + '/overlays/chat?apiKey=id.' + 'A' * 4093 + '&service=' + '%E6%97%A5' * 256})
         self.wait_for("document.querySelectorAll('.message').length === 1")
-        self.assertEqual(state['history_calls'], 1)
+        self.assertEqual(state.get('history_calls', 0), 0)
 
-    def test_unexpected_legacy_v2_frame_is_ignored(self):
-        state['history'] = [message(1)]
-        state['events'] = [{'schemaVersion': 1, 'id': 'epoch:1', 'type': 'message.created', 'data': {'resourceVersion': 2, 'batchId': '2', 'index': 0, 'message': message(2, body='Legacy frame excluded')}}]
+    def test_data_before_ready_and_legacy_v2_are_ignored(self):
+        state['before_ready'] = [envelope(1, message(1, body='Before ready'))]
+        state['events'] = [{'schemaVersion': 1, 'id': 'epoch:2', 'type': 'message.created', 'data': {'resourceVersion': 2, 'batchId': '2', 'index': 0, 'message': message(2, body='Legacy excluded')}}, envelope(3, message(3, body='Eligible live'))]
         self.open_chat()
-        self.wait_for("document.querySelectorAll('.message').length === 1")
-        self.assertNotIn('Legacy frame excluded', self.evaluate('return document.body.textContent'))
+        self.wait_for("document.body.textContent.includes('Eligible live')")
+        self.assertEqual(self.evaluate("return document.querySelectorAll('.message').length"), 1)
 
-    def test_malformed_stream_clears_and_reconnects(self):
+    def test_malformed_stream_clears_then_reconnects_without_history(self):
         state['malformed'] = True
         self.open_chat()
         self.wait_for("document.getElementById('status').textContent.includes('Reconnecting')")
         self.assertEqual(self.evaluate("return document.querySelectorAll('.message').length"), 0)
         state['malformed'] = False
-        state['history'] = [message(1, body='Recovered')]
-        self.wait_for("document.querySelector('.content')?.textContent === 'Recovered'")
+        state['events'] = [envelope(1, message(1, body='Recovered live'))]
+        self.wait_for("document.querySelector('.content')?.textContent === 'Recovered live'")
         self.assertEqual(state['streams'], 2)
+        self.assertEqual(state.get('history_calls', 0), 0)
 
-    def test_bootstrap_overflow_restarts_without_rendering_partial_history(self):
-        state['history_delay'] = 2
-        state['events'] = [envelope(i, message(i)) for i in range(1, 258)]
-        self.open_chat()
-        self.wait_for("document.getElementById('status').textContent.includes('Reconnecting')")
-        self.assertEqual(self.evaluate("return document.querySelectorAll('.message').length"), 0)
-        state['history_delay'] = .1
-        state['events'] = []
-        state['history'] = [message(300, body='Fresh after overflow')]
-        self.wait_for("document.querySelector('.content')?.textContent === 'Fresh after overflow'")
-        self.assertEqual(state['streams'], 2)
-
-    def test_duplicate_live_events_render_one_v3_message(self):
-        item = message(1, body='Legacy live message')
-        event = envelope(1, item)
-        state['events'] = [event, event, envelope(2, message(1))]
-        self.open_chat()
-        self.wait_for("document.querySelectorAll('.message').length === 1")
-        self.assertEqual(self.evaluate("return document.querySelectorAll('.message').length"), 1)
-
-    def test_reconnect_clears_stale_rows_and_refreshes_context(self):
-        state['history'] = [message(1, body='Stale row')]
+    def test_reconnect_retains_event_and_resource_dedupe_without_revival(self):
+        state['events'] = [envelope(1, message(1, body='Original live'))]
         state['disconnect_first'] = True
         self.open_chat()
         self.wait_for("document.querySelectorAll('.message').length === 1")
         self.wait_for("document.getElementById('status').textContent.includes('Reconnecting')")
         self.assertEqual(self.evaluate("return document.querySelectorAll('.message').length"), 0)
-        state['history'] = [message(2, body='Fresh context')]
-        self.wait_for("document.querySelector('.content')?.textContent === 'Fresh context'")
-        self.assertEqual(state['streams'], 2)
-        self.assertEqual(state['history_calls'], 2)
+        state['events'] = [envelope(1, message(1, body='Original live')), envelope(2, message(1, body='Duplicate resource')), envelope(3, message(3, body='New after reconnect'))]
+        self.wait_for("document.body.textContent.includes('New after reconnect')")
+        self.assertEqual(self.evaluate("return document.querySelectorAll('.message').length"), 1)
+        self.assertEqual(state.get('history_calls', 0), 0)
+
+    def test_old_and_future_source_times_use_receipt_lifetime(self):
+        if not CHROMIUM: self.skipTest('Controlled clock requires Chromium')
+        self.page.clock.install()
+        old = envelope(1, message(1)); old['time'] = '2000-01-01T00:00:00Z'
+        future = envelope(2, message(2)); future['data']['message']['time'] = '2100-01-01T00:00:00Z'
+        state['events'] = [old, future]
+        self.open_chat()
+        self.wait_for("document.querySelectorAll('.message').length === 2")
+        self.page.clock.fast_forward(7900)
+        self.assertEqual(self.evaluate("return document.querySelectorAll('.message').length"), 2)
+        self.page.clock.fast_forward(1200)
+        self.assertEqual(self.evaluate("return document.querySelectorAll('.message').length"), 0)
+
+    def test_stream_reset_clears_without_history_or_duplicate_revival(self):
+        state['events'] = [envelope(1, message(1, body='Before reset'))]
+        self.open_chat()
+        self.wait_for("document.querySelectorAll('.message').length === 1")
+        state['reset'] = True
+        self.wait_for("document.getElementById('status').textContent.includes('Reconnecting')")
+        self.assertEqual(self.evaluate("return document.querySelectorAll('.message').length"), 0)
+        state['events'].append(envelope(2, message(2, body='New after reset')))
+        self.wait_for("document.body.textContent.includes('New after reset')")
+        self.assertEqual(self.evaluate("return document.querySelectorAll('.message').length"), 1)
+        self.assertEqual(state.get('history_calls', 0), 0)
+
+    def test_both_dedupe_windows_evict_after_256_recent_ids(self):
+        state['events'] = [envelope(i, message(i)) for i in range(1, 258)]
+        self.open_chat()
+        self.wait_for("document.querySelectorAll('.message').length === 50")
+        state['events'].append(envelope(1, message(1, body='New lifetime after bounded eviction')))
+        self.wait_for("document.body.textContent.includes('New lifetime after bounded eviction')")
+        self.assertEqual(self.evaluate("return document.querySelectorAll('.message').length"), 50)
+
+    def test_actual_fade_and_new_arrival_does_not_restart_old_animation(self):
+        state['events'] = [envelope(1, message(1, body='First fading row'))]
+        self.open_chat()
+        self.wait_for("document.querySelectorAll('.message').length === 1")
+        self.evaluate("window.originalRow=document.querySelector('.message'); return true")
+        self.assertEqual(self.evaluate("return Number(getComputedStyle(originalRow).opacity)"), 1)
+        time.sleep(7.7)
+        self.assertEqual(self.evaluate("return Number(getComputedStyle(originalRow).opacity)"), 1)
+        time.sleep(.55)
+        fading = self.evaluate("return Number(getComputedStyle(originalRow).opacity)")
+        self.assertGreater(fading, 0)
+        self.assertLess(fading, 1)
+        state['events'].append(envelope(2, message(2, body='Second fresh row')))
+        self.wait_for("document.querySelectorAll('.message').length === 2")
+        self.assertTrue(self.evaluate("return originalRow === document.querySelector('.message')"))
+        time.sleep(.15)
+        self.assertLess(self.evaluate("return Number(getComputedStyle(originalRow).opacity)"), fading)
+        self.assertEqual(self.evaluate("return Number(getComputedStyle(document.querySelectorAll('.message')[1]).opacity)"), 1)
+        self.wait_for("!originalRow.isConnected", timeout=2)
+        self.assertEqual(self.evaluate("return document.querySelectorAll('.message').length"), 1)
+
+    def test_reduced_motion_keeps_deadline_without_animation(self):
+        if not CHROMIUM: self.skipTest('Controlled clock requires Chromium')
+        self.page.emulate_media(reduced_motion='reduce')
+        self.page.clock.install()
+        state['events'] = [envelope(1, message(1))]
+        self.open_chat()
+        self.wait_for("document.querySelectorAll('.message').length === 1")
+        self.assertEqual(self.evaluate("return getComputedStyle(document.querySelector('.message')).animationName"), 'none')
+        self.page.clock.fast_forward(9100)
+        self.assertEqual(self.evaluate("return document.querySelectorAll('.message').length"), 0)
+        self.page.emulate_media(reduced_motion='no-preference')
+
+    def test_visibility_resume_prunes_overdue_and_expired_id_does_not_reappear(self):
+        state['events'] = [envelope(1, message(1))]
+        self.open_chat()
+        self.wait_for("document.querySelectorAll('.message').length === 1")
+        self.evaluate("const now=performance.now.bind(performance); performance.now=()=>now()+10000; document.dispatchEvent(new Event('visibilitychange')); return true")
+        self.assertEqual(self.evaluate("return document.querySelectorAll('.message').length"), 0)
+        state['events'].extend([envelope(1, message(1)), envelope(2, message(1))])
+        time.sleep(.2)
+        self.assertEqual(self.evaluate("return document.querySelectorAll('.message').length"), 0)
+
+    def test_teardown_cancels_expiry_work_and_rows(self):
+        if not CHROMIUM: self.skipTest('Controlled clock requires Chromium')
+        self.page.clock.install()
+        self.page.add_init_script("window.fixtureTimers=new Set; const schedule=window.setTimeout; const cancel=window.clearTimeout; window.setTimeout=(fn,delay,...args)=>{let id=schedule(()=>{fixtureTimers.delete(id);fn(...args)},delay);fixtureTimers.add(id);return id};window.clearTimeout=id=>{fixtureTimers.delete(id);cancel(id)}")
+        state['events'] = [envelope(i, message(i)) for i in range(1, 60)]
+        self.open_chat()
+        self.wait_for("document.querySelectorAll('.message').length === 50")
+        self.assertEqual(self.evaluate('return fixtureTimers.size'), 1)
+        self.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide')); return true")
+        self.assertEqual(self.evaluate('return fixtureTimers.size'), 0)
+        self.assertEqual(self.evaluate("return document.querySelectorAll('.message').length"), 0)
 
     def test_transparent_responsive_preview(self):
-        state['history'] = [message(3, 'studio', 'A clear multistream overlay. Welcome to the stream!', 'youtube'), message(2, 'main', 'Second channel, same conversation.'), message(1, 'main', 'Synthetic preview · no real chat or credentials')]
+        state['events'] = [envelope(1, message(1, 'main', 'Synthetic preview · new live messages only')), envelope(2, message(2, 'main', 'Eight seconds, then fade away.')), envelope(3, message(3, 'studio', 'One conversation across channels.', 'youtube'))]
         self.command('/session/' + self.session + '/window/rect', {'width': 1920, 'height': 1080})
         self.open_chat()
         self.wait_for("document.querySelectorAll('.message').length === 3")

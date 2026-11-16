@@ -44,7 +44,7 @@
       const connection = new AbortController();
       controller = connection;
       const signal = connection.signal;
-      let bootstrapError;
+      let readyError;
       try {
         const query = filters();
         query.set('types', kind);
@@ -63,20 +63,17 @@
           if (event === 'stream.ready') {
             if (ready || payload.schemaVersion !== 1 || payload.replay !== false || payload.resyncRequired !== true) throw new Error('Invalid ready');
             ready = true;
-            hooks.ready(signal, async () => {
-              const q = filters();
-              q.set('count', '50'); q.set('sort', 'time'); q.set('descending', 'true');
-              return (await request('/api/v3/messages', q, signal)).json();
-            }).then(() => { attempt = 0; }).catch(error => { bootstrapError = error; connection.abort(); });
+            hooks.ready(signal).then(() => { if (!signal.aborted) attempt = 0; }).catch(error => { readyError = error; connection.abort(); });
           } else if (event === 'stream.reset') throw new Error('Stream reset');
-          else if (event === kind) {
-            if (!ready || payload.schemaVersion !== 1 || payload.type !== kind || typeof payload.id !== 'string' || !payload.id || payload.id.length > 128) throw new Error('Invalid event');
+          else if (event === kind && ready && !signal.aborted) {
+            if (payload.schemaVersion !== 1 || payload.type !== kind || typeof payload.id !== 'string' || !payload.id || payload.id.length > 128) throw new Error('Invalid event');
             hooks.event(payload);
           }
           data = ''; event = ''; frameBytes = 0;
         };
         while (!signal.aborted) {
           const part = await reader.read();
+          if (signal.aborted) return;
           if (part.done) throw new Error('Stream ended');
           buffer += decoder.decode(part.value, { stream: true });
           if (encoder.encode(buffer).length > MAX_FRAME) throw new Error('Frame too large');
@@ -101,9 +98,9 @@
         connection.abort();
         hooks.clear();
         if (stopped) return;
-        const failure = bootstrapError || error;
+        const failure = readyError || error;
         if (failure.status === 401 || failure.status === 403) { stopped = true; show('Key invalid, expired or unavailable for this channel.'); return; }
-        show('Reconnecting · recent context will refresh');
+        show('Reconnecting · waiting for new events');
         retry = setTimeout(run, Math.min(30000, 1000 * 2 ** Math.min(attempt++, 5)) + Math.random() * 200);
       }
     };

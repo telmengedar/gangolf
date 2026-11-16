@@ -201,12 +201,44 @@ class VideoBrowserTests(unittest.TestCase):
             server.player_origin = self.parent_origin
         try:
             self.page.goto(self.parent_origin + '/overlays/video?apiKey=' + KEY)
-            self.page.wait_for_function("()=>document.getElementById('status').textContent.includes('separate trusted')")
+            self.page.wait_for_function("()=>document.getElementById('status').textContent.includes('video_origin_same')")
             self.assertEqual(self.state['streams'], streams)
             self.assertEqual(len(self.provider_requests), 0)
         finally:
             for server in self.servers:
                 server.player_origin = self.player_origin
+
+    def test_origin_metadata_errors_are_fixed_and_do_not_echo_invalid_values(self):
+        original = (ASSETS / 'video.html').read_text()
+        for value, code in [('', 'video_config_missing'), ('javascript:bad?apiKey=' + KEY, 'video_config_invalid'), (self.player_origin + '/path', 'video_config_invalid')]:
+            with self.subTest(code=code, value_type='invalid' if value else 'missing'):
+                body = original.replace('{{.PlayerOrigin}}', value).replace('{{.ParentOrigin}}', self.parent_origin)
+                self.context.route(self.parent_origin + '/overlays/video?*', lambda route, request, body=body: route.fulfill(status=200, content_type='text/html', body=body))
+                streams = self.state['streams']
+                self.page.goto(self.parent_origin + '/overlays/video?apiKey=' + KEY)
+                self.page.wait_for_function('(code)=>document.getElementById("status").textContent.includes(code)', arg=code)
+                status = self.page.locator('#status').inner_text()
+                self.assertNotIn(KEY, status)
+                self.assertNotIn('javascript:', status)
+                self.assertEqual(self.state['streams'], streams)
+                self.assertEqual(len(self.provider_requests), 0)
+                self.context.unroute(self.parent_origin + '/overlays/video?*')
+
+    def test_parent_mismatch_shows_only_expected_and_current_origins(self):
+        expected = 'http://192.168.178.21:8092'
+        body = (ASSETS / 'video.html').read_text().replace('{{.PlayerOrigin}}', self.player_origin).replace('{{.ParentOrigin}}', expected)
+        self.context.route(self.parent_origin + '/overlays/video?*', lambda route: route.fulfill(status=200, content_type='text/html', body=body))
+        streams = self.state['streams']
+        self.page.goto(self.parent_origin + '/overlays/video?apiKey=' + KEY)
+        self.page.wait_for_function('()=>document.getElementById("status").textContent.includes("video_origin_mismatch")')
+        status = self.page.locator('#status').inner_text()
+        self.assertIn(expected, status)
+        self.assertIn(self.parent_origin, status)
+        self.assertNotIn(KEY, status)
+        self.assertNotIn('apiKey', status)
+        self.assertEqual(self.state['streams'], streams)
+        self.assertEqual(self.page.locator('a,iframe').count(), 0)
+        self.assertEqual(len(self.provider_requests), 0)
 
     def test_wrong_source_nonce_generation_and_unknown_status_do_not_advance(self):
         self.emit(self.event(1))
@@ -308,7 +340,7 @@ class VideoBrowserTests(unittest.TestCase):
         self.page.wait_for_function("()=>document.querySelector('iframe') !== null")
         self.page.clock.fast_forward(20001)
         self.assertEqual(self.page.locator('iframe').count(), 0)
-        self.assertIn('did not start', self.page.locator('#status').inner_text())
+        self.assertIn('video_player_timeout', self.page.locator('#status').inner_text())
         self.mode = 'playing'
         self.emit(self.event(2))
         self.player(2)

@@ -2,17 +2,25 @@
   const { create } = window.GangolfOverlay;
   const host = document.getElementById('player-host');
   const actions = document.getElementById('actions');
-  const originValue = document.querySelector('meta[name="gangolf-player-origin"]').content;
-  const parentOrigin = document.querySelector('meta[name="gangolf-parent-origin"]').content;
+  const originValue = document.querySelector('meta[name="gangolf-player-origin"]')?.content;
+  const parentOrigin = document.querySelector('meta[name="gangolf-parent-origin"]')?.content;
+  const fail = (code, message) => { document.getElementById('status').textContent = message + ' (' + code + ')'; };
   let playerOrigin;
+  if (!originValue || !parentOrigin) { fail('video_config_missing', 'Video player configuration is unavailable.'); return; }
   try {
     const url = new URL(originValue);
-    if (parentOrigin !== location.origin || !['https:', 'http:'].includes(url.protocol) || url.origin === location.origin || url.href !== url.origin + '/') throw new Error('Invalid player origin');
+    const parent = new URL(parentOrigin);
+    if (![url, parent].every(value => ['https:', 'http:'].includes(value.protocol) && value.href === value.origin + '/') || originValue !== url.origin || parentOrigin !== parent.origin) throw new Error('Invalid origin metadata');
     playerOrigin = url.origin;
   } catch {
-    document.getElementById('status').textContent = 'A separate trusted player origin is required.';
+    fail('video_config_invalid', 'Video player configuration is unavailable.');
     return;
   }
+  if (parentOrigin !== location.origin) {
+    fail('video_origin_mismatch', 'This video overlay is configured for ' + parentOrigin + '. Current origin: ' + (['http:', 'https:'].includes(location.protocol) ? location.origin : 'unavailable') + '.');
+    return;
+  }
+  if (playerOrigin === parentOrigin) { fail('video_origin_same', 'Video playback requires a separate player origin.'); return; }
   let queue = [];
   let active;
   let frame;
@@ -54,7 +62,7 @@
     }, { once: true });
     host.replaceChildren(frame);
     client.show('Loading video…');
-    startup = setTimeout(() => next('Video unavailable · player did not start.'), 20000);
+    startup = setTimeout(() => next('Video player did not become ready. (video_player_timeout)'), 20000);
     watchdog = setTimeout(() => next('Video skipped · playback time limit.'), 300000);
   };
   window.addEventListener('message', event => {
