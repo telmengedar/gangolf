@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="gangolf-player-origin" content="{{.PlayerOrigin}}">
+  <meta name="gangolf-parent-origin" content="{{.ParentOrigin}}">
+  <title>Gangolf video overlay</title>
+  <link rel="stylesheet" href="/overlays/overlay.css">
+  <script src="/overlays/shared.js" defer></script>
+  <script src="/overlays/video.js" defer></script>
+</head>
+<body class="video">
+  <div id="player-host"></div>
+  <div id="status" role="status" aria-live="polite">Connecting…</div>
+  <div id="actions" hidden><button id="skip" type="button">Skip video</button></div>
+</body>
+</html>

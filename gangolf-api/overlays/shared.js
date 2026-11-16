@@ -21,8 +21,8 @@
     let attempt = 0;
     const status = document.getElementById('status');
     const show = (message) => { status.textContent = message; status.hidden = !message; };
-    const valid = key && key.length <= 4096 && (!channel || service) &&
-      location.search.length <= 4096 && !location.hash &&
+    const valid = key && encoder.encode(key).length <= 4096 && (!channel || service) &&
+      encoder.encode(location.search.slice(1)).length <= 8192 && !location.hash &&
       [...params.keys()].every(name => ['apiKey', 'service', 'channel'].includes(name) && params.getAll(name).length === 1 && params.get(name)) &&
       [service, channel].every(value => value === null || Array.from(value).length <= 256);
     const filters = () => {
@@ -85,7 +85,7 @@
             if (match[0] === '\r' && match.index === buffer.length - 1) break;
             const line = buffer.slice(0, match.index);
             buffer = buffer.slice(match.index + match[0].length);
-            frameBytes += encoder.encode(line).length;
+            frameBytes += encoder.encode(line).length + match[0].length;
             if (frameBytes > MAX_FRAME) throw new Error('Frame too large');
             if (!line) { deliver(); continue; }
             if (line.startsWith(':')) continue;

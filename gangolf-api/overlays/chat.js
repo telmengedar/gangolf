@@ -40,6 +40,7 @@
     while (rows.size > 50) rows.delete(rows.keys().next().value);
   };
   const apply = envelope => {
+    if (envelope.data?.resourceVersion === 2) return;
     if (envelope.data?.resourceVersion !== 3 || !envelope.data.message) throw new Error('Invalid message event');
     add(messageKey(envelope), envelope.data.message);
   };

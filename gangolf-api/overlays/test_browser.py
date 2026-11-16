@@ -111,6 +111,11 @@ class BrowserTests(unittest.TestCase):
         cls.server.daemon_threads = True
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
         cls.origin = 'http://127.0.0.1:' + str(cls.server.server_port)
+        if CHROMIUM:
+            from playwright.sync_api import sync_playwright
+            cls.playwright = sync_playwright().start()
+            cls.browser = cls.playwright.chromium.launch(headless=True)
+            cls.page = cls.browser.new_page()
         cls.session = cls.command('/session', {'capabilities': {'alwaysMatch': {'browserName': 'firefox', 'moz:firefoxOptions': {'args': ['-headless']}}}})['sessionId']
 
     @classmethod
@@ -121,6 +126,21 @@ class BrowserTests(unittest.TestCase):
 
     @classmethod
     def command(cls, path, data=None, method='POST'):
+        if CHROMIUM:
+            if path == '/session':
+                return {'sessionId': 'chromium'}
+            if path.endswith('/url'):
+                cls.page.goto(data['url'])
+            elif path.endswith('/execute/sync'):
+                return cls.page.evaluate('()=>{' + data['script'] + '}')
+            elif path.endswith('/window/rect'):
+                cls.page.set_viewport_size(data)
+            elif path.endswith('/screenshot'):
+                return base64.b64encode(cls.page.screenshot(omit_background=True)).decode()
+            elif method == 'DELETE':
+                cls.browser.close()
+                cls.playwright.stop()
+            return None
         request = urllib.request.Request(WEBDRIVER + path, data=json.dumps(data).encode() if data is not None else None, headers={'Content-Type': 'application/json'}, method=method)
         with urllib.request.urlopen(request, timeout=40) as response:
             return json.load(response)['value']
@@ -204,6 +224,19 @@ class BrowserTests(unittest.TestCase):
         self.wait_for("document.getElementById('status').textContent.includes('required')")
         self.assertFalse(any(request[0].startswith('/api/') for request in state['requests']))
 
+    def test_server_bounded_long_query_is_not_rejected_by_client(self):
+        state['history'] = [message(1)]
+        self.command('/session/' + self.session + '/url', {'url': self.origin + '/overlays/chat?apiKey=id.' + 'A' * 4093 + '&service=' + '%E6%97%A5' * 256})
+        self.wait_for("document.querySelectorAll('.message').length === 1")
+        self.assertEqual(state['history_calls'], 1)
+
+    def test_unexpected_legacy_v2_frame_is_ignored(self):
+        state['history'] = [message(1)]
+        state['events'] = [{'schemaVersion': 1, 'id': 'epoch:1', 'type': 'message.created', 'data': {'resourceVersion': 2, 'batchId': '2', 'index': 0, 'message': message(2, body='Legacy frame excluded')}}]
+        self.open_chat()
+        self.wait_for("document.querySelectorAll('.message').length === 1")
+        self.assertNotIn('Legacy frame excluded', self.evaluate('return document.body.textContent'))
+
     def test_malformed_stream_clears_and_reconnects(self):
         state['malformed'] = True
         self.open_chat()
@@ -268,7 +301,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--webdriver', default='http://127.0.0.1:4449')
     parser.add_argument('--artifacts')
+    parser.add_argument('--chromium', action='store_true')
     options, remaining = parser.parse_known_args()
     WEBDRIVER = options.webdriver
     ARTIFACTS = options.artifacts
+    CHROMIUM = options.chromium
     unittest.main(argv=[__file__] + remaining)
