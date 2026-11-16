@@ -2,3 +2,8 @@
 !*.go
 !go.mod
 !go.sum
+!overlays/
+overlays/**
+!overlays/*.html
+!overlays/*.js
+!overlays/*.css
