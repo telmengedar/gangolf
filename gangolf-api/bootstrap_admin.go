@@ -3,93 +3,18 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"syscall"
 	"time"
 )
 
 func (s *server) bootstrapAdmin(ctx context.Context, name, path string) (string, string, error) {
-	if !validAppName(&name, true, 256) || path == "" {
-		return "", "", errUnavailable
-	}
-	output, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		return "", "", errUnavailable
-	}
-	defer output.Close()
-	if err = output.Chmod(0600); err != nil {
-		return "", "", errUnavailable
-	}
-	info, err := output.Stat()
-	if err != nil || !safeBootstrapOutput(info, info) {
-		return "", "", errUnavailable
-	}
-	if err = lockResources(ctx); err != nil {
-		return "", "", err
-	}
-	defer resourceLock.Unlock()
-	cfg, err := s.graph.loadConfig(ctx)
-	if err != nil {
-		return "", "", err
-	}
-	for _, user := range cfg.Users {
-		if user.Enabled && permissionsContain(user.Permissions, "admin") {
-			return "", "", errCorrupt
-		}
-	}
-	nodeID, err := s.graph.createAppProfile(ctx, cfg.serviceOwner, "", &name)
-	if err != nil {
-		return "", "", err
-	}
-	userID := strconv.FormatInt(nodeID, 10)
-	if _, exists := cfg.Users[userID]; exists {
-		return "", "", errCorrupt
-	}
-	idBytes, secretBytes := make([]byte, 16), make([]byte, 32)
-	if _, err = rand.Read(idBytes); err != nil {
-		return "", "", errUnavailable
-	}
-	if _, err = rand.Read(secretBytes); err != nil {
-		return "", "", errUnavailable
-	}
-	keyID := base64.RawURLEncoding.EncodeToString(idBytes)
-	if _, exists := cfg.APIKeys[keyID]; exists {
-		return "", "", errUnavailable
-	}
-	token := keyID + "." + base64.RawURLEncoding.EncodeToString(secretBytes)
-	if _, err = io.WriteString(output, token+"\n"); err != nil {
-		return "", "", errUnavailable
-	}
-	if err = output.Sync(); err != nil {
-		return "", "", errUnavailable
-	}
-	if err = output.Close(); err != nil {
-		return "", "", errUnavailable
-	}
-	if err = verifyBootstrapOutput(path, info, token); err != nil {
-		return "", "", err
-	}
-	hash := hmac.New(sha256.New, []byte(s.pepper))
-	hash.Write([]byte(token))
-	expiry := s.now().UTC().Add(30 * 24 * time.Hour)
-	cfg.Users[userID] = grant{Enabled: true, Permissions: []string{"admin", "host"}, ProfileNodeID: userID, ManagedOnly: true}
-	cfg.APIKeys[keyID] = keyGrant{UserID: userID, Hash: hash.Sum(nil), Enabled: true, Permissions: []string{"admin", "host"}, Scope: "api", ExpiresAt: &expiry}
-	if err = s.graph.saveAuth(ctx, cfg); err != nil {
-		return "", "", err
-	}
-	if err = verifyBootstrapOutput(path, info, token); err != nil {
-		return "", "", errOutcomeUnknown
-	}
-	return userID, keyID, nil
+	result, err := s.operatorAdminKey(ctx, "", name, path, nil)
+	return result.UserID, result.KeyID, err
 }
 
 func bootstrapAdminCommand(args []string) error {

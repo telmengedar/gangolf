@@ -234,3 +234,20 @@ The command refuses if an enabled app admin already exists. It creates a separat
 If activation or confirmation is uncertain, the command fails and preserves that exact protected file. Do not delete it or blindly rerun bootstrap: the write may have committed. Recover with the saved token through the normal header-authenticated `GET /api/v3/users/current`, or have the operator inspect the authoritative key/user/profile binding offline. Inconclusive recovery never authorizes reissuance. A fresh exclusive output path may be used only after confirming no admin or intended key was activated. The command does not authorize a production provisioning window by itself.
 
 The API serializes local security mutations and confirms complete config writes by readback. Cross-node changes are not distributed transactions; failures can leave non-authoritative staging profiles. A `write_outcome_unknown` response is not success: reconcile by GET before retrying creation. Run exactly one API writer.
+
+
+### Renewing an existing administrator key
+
+An authorized operator can issue a fresh finite key for an existing enabled administrator, including after all earlier application admin keys have expired or been lost. Use an explicitly authorized offline writer-quiet window and the existing protected primary graph configuration and pepper:
+
+```sh
+./gangolf-api admin-key --user-id <EXISTING_ADMIN_ID> --output <NEW_PRIVATE_FILE>
+```
+
+Optional `--expires-at <RFC3339_TIME>` selects a future expiry at most365days from the command’s current time; the default is30days. The target must already have an enabled admin grant and a valid, nondeleted bound profile. This command creates no user/profile, grants no role, and retains every existing key. It issues one fixed `api` key with `admin` and `host` permissions. It requires operator/service authority, not an old app token, so the new lifetime does not inherit an earlier app key’s cutoff.
+
+The output path must be new and inside a trusted operator-controlled private directory. The command reuses bootstrap’s exclusive0600 file, same-file/owner/link/mode/exact-byte checks, file+directory durability and independent auth readback. Raw credential bytes go only to that file. Successful stdout contains `userId`, `keyId`, `expiresAt` and `file`; no token. No listener, receiver, model run or import starts.
+
+If confirmation is uncertain, retain the exact file and reconcile its saved token read-only with ordinary header-authenticated `GET /api/v3/users/current` and `GET /api/v3/tokens/<KEY_ID>`. A possible commit is not permission to blindly issue another key. Failed preactivation custody checks activate nothing; post-submission custody loss returns an unknown outcome. Later destruction by the trusted operator cannot be prevented by these bounded checks. A fresh separately authorized offline issuance can recover lost app credentials while the existing admin grant/profile and primary service authority remain valid; disabled/deleted/downgraded admins and corrupt service state are outside this command.
+
+HTTP token issuance still caps descendants at their authenticating credential’s expiry. Offline renewal adds a fresh operator-authorized finite key; it does not extend or revoke existing keys. After verification, old keys can be revoked through the existing authenticated token DELETE route under separate explicit operational scope. Never run this command concurrently with the API writer or overwrite the initial saved admin key file.
