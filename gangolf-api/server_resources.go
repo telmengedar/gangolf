@@ -258,6 +258,7 @@ func (s *server) createV3(ctx context.Context, w http.ResponseWriter, r *http.Re
 		return
 	}
 	s.createdMessage(id, m)
+	s.scheduleVideo(id)
 	w.Header().Set("Location", "/api/v3/messages/"+strconv.FormatInt(id, 10))
 	respond(w, 201, m.resource(id))
 }

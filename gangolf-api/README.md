@@ -1,6 +1,6 @@
 # Gangolf API
 
-Clips and triggers are managed through `/api/v3/clips` and `/api/v3/triggers`. The catalog contains mutable metadata, not downloaded media. It does not execute triggers or play videos.
+Clips and triggers are managed through `/api/v3/clips` and `/api/v3/triggers`. The catalog contains mutable metadata, not downloaded media. New eligible messages can produce automatic video intents; the browser overlay handles playback.
 
 | Resource | Collection | Item |
 | --- | --- | --- |
@@ -217,7 +217,7 @@ New lists use `count` (default100,max500), `continue`, `sort=id` and `descending
 
 Issue a normal token with POST `/api/v3/users/current/tokens` and `{"name":"Desktop","scope":"api","permissions":["host"]}`. The successful201 response includes `token` exactly once; later GET/list responses contain only metadata. Tokens retain the existing `id.secret` format, but only a keyed hash is stored. API tokens use headers and default to30days, with a365day maximum. Their permissions are bounded by both issuer and target user. Revocation is DELETE on the token item, including the current token; user disable/delete and role changes apply on each fresh authorization.
 
-For URL-only clients issue `{"name":"Overlay","scope":"channel-read","channelIds":["<owned-channel-id>"]}`. These host-only tokens default to24hours with a30day maximum and permit only GET v3 channels/messages/events for the selected owned channels. Both event kinds use that restriction. Optional `expiresAt` must be future UTC and within the scope limit; expiry is also capped by a finite issuer credential. Read tokens cannot manage users/tokens, write messages, access the catalog or publish video intents.
+For URL-only clients issue `{"name":"Overlay","scope":"channel-read","channelIds":["<eligible-channel-id>"]}`. An eligible channel is either an active channel owned by the target app user or a legacy root channel with an exact enabled trusted Twitch profile for that user. Legacy channels retain their identity and ownerUserId:null; issuing a read key does not adopt or migrate them. Disabling that profile denies these scoped legacy history reads as well as live events; existing generic-key historical behavior stays unchanged. The explicit channel list must be nonempty and unique. To display several channels, list every desired ID when issuing the key; newly registered channels require a new key with an expanded list. These host-only tokens default to24hours with a30day maximum and permit only GET v3 channels/messages/events for the selected eligible channels. Both event kinds use that restriction. Optional `expiresAt` must be future UTC and within the scope limit; expiry is also capped by a finite issuer credential. Read tokens cannot manage users/tokens, write messages, access the catalog or publish video intents.
 
 Use `apiKey=<URL-encoded-channel-read-token>` only on those GET routes. Header+query, repeated/encoded duplicate query credentials, malformed escapes, query JWTs and admin query credentials are rejected. Existing pre-feature nonadmin keys retain message-GET query compatibility. Tokens never appear in Locations, errors or event frames. Responses include `Cache-Control:no-store` and `Referrer-Policy:no-referrer`; external browser/proxy logs can still retain URLs, so use short-lived read scopes and headers whenever possible.
 
@@ -251,3 +251,35 @@ The output path must be new and inside a trusted operator-controlled private dir
 If confirmation is uncertain, retain the exact file and reconcile its saved token read-only with ordinary header-authenticated `GET /api/v3/users/current` and `GET /api/v3/tokens/<KEY_ID>`. A possible commit is not permission to blindly issue another key. Failed preactivation custody checks activate nothing; post-submission custody loss returns an unknown outcome. Later destruction by the trusted operator cannot be prevented by these bounded checks. A fresh separately authorized offline issuance can recover lost app credentials while the existing admin grant/profile and primary service authority remain valid; disabled/deleted/downgraded admins and corrupt service state are outside this command.
 
 HTTP token issuance still caps descendants at their authenticating credential’s expiry. Offline renewal adds a fresh operator-authorized finite key; it does not extend or revoke existing keys. After verification, old keys can be revoked through the existing authenticated token DELETE route under separate explicit operational scope. Never run this command concurrently with the API writer or overwrite the initial saved admin key file.
+
+
+## OBS overlays
+
+Use a channel-read token issued through the existing self/admin token endpoint, then add a Browser Source with `/overlays/chat?apiKey=<URL-encoded-read-token>`. Optional `service` and `channel` select one channel; `channel` requires `service`. Omitting both merges all currently permitted channels explicitly listed in the token, across services. Generic management keys and JWTs are rejected by the HTML entry point. Token-bearing HTML is never templated with the key; first-party scripts use bearer GETs afterward. The fixed public JS/CSS assets reject query strings. The response policy prevents third-party scripts in the credential-bearing page.
+
+Chat opens the live stream before loading the latest 50 authorized v3 messages, merges IDs, and keeps 50 rows. Text and emote codes render as text. Disconnect clears visible state before bounded reconnect; revoked/invalid keys stop the overlay. There is no lossless event replay guarantee.
+
+Automatic video matching only schedules confirmed new local v3 messages and new non-bot Twitch inbound messages. Outbound messages, v2 batches, replay, history, edits and startup scans do not schedule matching. The source must still be active and belong to the configured media tenant by managed ownership or the exact enabled legacy Twitch association. Optional media failures never fail durable chat.
+
+The worker has one goroutine, a 64-ID nonblocking queue and a three-second total attempt deadline. Overflow drops the ephemeral opportunity. It loads a private validated catalog snapshot outside the resource lock; current source/config checks precede emission. A catalog-save generation change, busy media lock, unavailable storage or revoked source drops the attempt without retry. This consistency is process-local under the existing singleton/no-external-writer assumption; it is not a remote graph transaction or durable exactly-once system.
+
+Matching joins text and emote codes in chunk order, trims outer Unicode punctuation/whitespace, lowercases Unicode and collapses whitespace. Internal punctuation remains literal. A whole normalized trigger phrase must match the start or end with a token boundary: `hello` matches `HELLO!` and `say hello`, never `hellothere` or `say hello friend`; `hello world` matches `hello   world!`, never `hello, world`. The longest resolved phrase wins, with lowest numeric trigger ID resolving equal-length phrase conflicts. One resolved trigger row is selected uniformly among that winning phrase's rows, preserving duplicate weighting and variants. Unresolved references never match, and one message emits at most one automatic intent.
+
+The existing manual typed video endpoint keeps its independent catalog/source authorization and repeated-publication semantics. Video consumption does not grant catalog listing or publication authority. No media download, server playback or media proxy is added. Deployment reachability, request-query logging, browser/provider compatibility and OBS audio require separate operational validation; serving these pages does not establish a public access route.
+
+
+### Separate video player origin
+
+`/overlays/video?apiKey=<URL-encoded-read-token>` uses a separate, key-free player origin. Configure all three fields explicitly to enable it:
+
+| Environment field | Meaning |
+| --- | --- |
+| `GANGOLF_OVERLAY_PLAYER_LISTEN_ADDR` | Dedicated local TCP listen address; it need not equal an externally visible proxy address. |
+| `GANGOLF_OVERLAY_PLAYER_ORIGIN` | Trusted browser-visible HTTP(S) origin serving the clean player. |
+| `GANGOLF_OVERLAY_PARENT_ORIGIN` | Trusted browser-visible API/OBS parent origin. |
+
+All absent leaves chat available and returns authenticated `503 player_unavailable` for the video page. Partial, invalid, equal-origin or conflicting bind configuration fails startup; no origin is inferred from Host/forwarding headers. Supply literal origins without credentials, paths, queries or fragments. Canonicalization folds hostname/scheme case and removes default ports; the origins must still differ. The dedicated listener starts and stops with the API. It serves only `/overlays/player.html`, `/overlays/player.js` and `/overlays/overlay.css`, rejects query strings/Authorization and has no API routes. The main API never serves player HTML or JavaScript.
+
+The video parent retains the key in first-party controller state, embeds only the configured clean origin and sends only validated clip instructions across an exact-origin bridge. Both documents receive escaped nonsecret origin metadata. The child loads the official YouTube SDK under its own provider policy and sends clean-origin referrers; it cannot read the cross-origin parent's credentials. Actual origin mismatches stop before playback. The origin configuration does not install ingress, TLS, DNS or CORS or choose a public access route.
+
+Video event subscription checks primary credentials/channels before media work, validates media availability without holding the primary resource lock, then reloads primary authorization after the wait. Initial, data and heartbeat checks share the existing total ten-second read budget. Slow optional media cannot hold the resource lock through this consumer path; explicit catalog operations and manual typed publication retain their existing independent locking/latency behavior. Message-only streams do not gain a media dependency.

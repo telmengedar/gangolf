@@ -117,6 +117,12 @@ func (p messagePolicy) allowed(ctx context.Context, service, channel, id string,
 	if err != nil {
 		return false, err
 	}
+	if p.principal.Scope == "channel-read" {
+		if !permissionsContain(p.principal.ChannelIDs, strconv.FormatInt(n.ID, 10)) {
+			return false, nil
+		}
+		return p.scopedReadChannel(ctx, strconv.FormatInt(n.ID, 10), active)
+	}
 	owner, valid := p.channelOwner(*n)
 	if !valid {
 		return false, errCorrupt
@@ -146,12 +152,38 @@ func (p messagePolicy) allowed(ctx context.Context, service, channel, id string,
 			return false, nil
 		}
 	}
-	if p.principal.Scope == "channel-read" {
-		if owner != p.principal.UserID || !permissionsContain(p.principal.ChannelIDs, strconv.FormatInt(n.ID, 10)) {
-			return false, nil
+	return true, nil
+}
+
+func (p messagePolicy) scopedReadChannel(ctx context.Context, id string, active bool) (bool, error) {
+	n, err := p.channel(ctx, "", "", id)
+	if err != nil || n == nil {
+		return false, err
+	}
+	identity, err := channelIdentity(*n)
+	if err != nil {
+		return false, err
+	}
+	owner, valid := p.channelOwner(*n)
+	if !valid {
+		return false, errCorrupt
+	}
+	if owner != "" {
+		if identity.SchemaVersion != 2 {
+			return false, errCorrupt
+		}
+		return owner == p.principal.UserID && (!active || identity.Enabled != nil && *identity.Enabled && !identity.Deleted), nil
+	}
+	if identity.SchemaVersion != 1 || identity.Service != "Twitch" {
+		return false, nil
+	}
+	matches := 0
+	for _, profile := range p.profiles {
+		if profile.AuthConfigID == p.authID && profile.TenantUserID == p.principal.UserID && profile.ChannelID == id && profile.BroadcasterUserID == identity.Channel && profile.Enabled != nil && *profile.Enabled {
+			matches++
 		}
 	}
-	return true, nil
+	return matches == 1, nil
 }
 
 func (s *server) twitchChannelAllowed(ctx context.Context, cfg *authConfig, profile twitchProfile) error {

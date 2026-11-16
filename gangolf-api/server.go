@@ -14,12 +14,14 @@ import (
 )
 
 type server struct {
-	events *eventHub
-	media  *mediaStore
-	twitch *twitchRuntime
-	graph  *graph
-	pepper string
-	now    func() time.Time
+	player  *overlayPlayer
+	matcher *videoMatcher
+	events  *eventHub
+	media   *mediaStore
+	twitch  *twitchRuntime
+	graph   *graph
+	pepper  string
+	now     func() time.Time
 }
 
 func respond(w http.ResponseWriter, status int, value any) {
@@ -47,6 +49,10 @@ func storageFailure(w http.ResponseWriter, err error) {
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
+	if strings.HasPrefix(r.URL.Path, "/overlays/") {
+		s.overlayHTTP(w, r)
+		return
+	}
 	var credentialsValid bool
 	r, credentialsValid = prepareCredential(r)
 	if !credentialsValid {

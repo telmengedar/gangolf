@@ -1,0 +1,20 @@
+:root { color-scheme: dark; font-family: system-ui, sans-serif; font-size: 28px; }
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 100%; height: 100%; background: transparent; overflow: hidden; }
+body { color: #fff; }
+.chat { display: flex; flex-direction: column; justify-content: flex-end; gap: .25rem; padding: .35rem; }
+#messages { min-height: 0; display: flex; flex-direction: column; justify-content: flex-end; gap: .22rem; overflow: hidden; }
+.message { flex-shrink: 0; padding: .3rem .48rem; border-radius: .22rem; background: rgb(12 16 24 / 82%); overflow-wrap: anywhere; text-shadow: 0 1px 3px #000; }
+.source { display: block; color: #bfdae9; font-size: .54rem; line-height: 1.5; }
+.author { font-weight: 750; color: #e4d4ff; }
+.content { white-space: pre-wrap; line-height: 1.35; }
+#status { flex-shrink: 0; align-self: flex-start; max-width: 100%; padding: .24rem .45rem; border-radius: .2rem; background: rgb(12 16 24 / 88%); color: #fff; font-size: .58rem; overflow-wrap: anywhere; }
+[hidden] { display: none !important; }
+.video #status { position: absolute; z-index: 2; left: .35rem; bottom: .35rem; pointer-events: none; }
+.video iframe { width: 100%; height: 100%; border: 0; }
+#player-host, .player #provider, .player iframe { width: 100%; height: 100%; border: 0; }
+.player #start { position: absolute; bottom: .5rem; left: .5rem; z-index: 2; }
+.video #actions { position: absolute; z-index: 3; left: .35rem; bottom: 1.8rem; display: flex; gap: .3rem; }
+button { font: inherit; font-size: .6rem; color: #fff; background: #202838; border: 2px solid #c8d8f1; border-radius: .2rem; padding: .35rem .55rem; cursor: pointer; }
+button:focus-visible { outline: 3px solid #bba0ff; outline-offset: 3px; }
+@media (max-width: 640px) { :root { font-size: 22px; } .chat { padding: .2rem; } }

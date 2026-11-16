@@ -47,7 +47,7 @@ func (s *server) videoEvent(ctx context.Context, w http.ResponseWriter, r *http.
 		return
 	}
 	defer resourceLock.Unlock()
-	p, cfg, status, code := s.eventAuthorization(ctx, r, false)
+	p, cfg, status, code := s.eventAuthorization(ctx, r)
 	if status != 0 {
 		failure(w, status, code)
 		return
@@ -71,27 +71,13 @@ func (s *server) videoEvent(ctx context.Context, w http.ResponseWriter, r *http.
 		failure(w, 503, "media_unavailable")
 		return
 	}
-	sourceRows, err := s.graph.queryResourceItem(ctx, "message", "", cfg.serviceOwner, s.graph.group, id)
+	source, found, err := s.videoSource(ctx, cfg, id)
 	if err != nil {
 		storageFailure(w, err)
 		return
 	}
-	if len(sourceRows) == 0 {
+	if !found {
 		failure(w, 404, "not_found")
-		return
-	}
-	if len(sourceRows) != 1 {
-		storageFailure(w, errCorrupt)
-		return
-	}
-	sourceNode := sourceRows[0]
-	source, err := decodeMessage(sourceNode)
-	if err != nil || source.Deleted {
-		failure(w, 404, "not_found")
-		return
-	}
-	if err = s.graph.validateRelations(ctx, sourceNode, source, cfg.serviceOwner); err != nil {
-		storageFailure(w, err)
 		return
 	}
 	policy := s.policy(p, cfg)
@@ -122,11 +108,7 @@ func (s *server) videoEvent(ctx context.Context, w http.ResponseWriter, r *http.
 				if clip.ID != *trigger.ClipID {
 					continue
 				}
-				e := s.publishEvent("video.triggered", source.Service, source.Channel, &source.ChannelID, struct {
-					MessageID string       `json:"messageId"`
-					Trigger   mediaTrigger `json:"trigger"`
-					Clip      mediaClip    `json:"clip"`
-				}{input.MessageID, trigger, clip})
+				e := s.publishVideo(input.MessageID, source, trigger, clip)
 				respond(w, 200, e)
 				return
 			}

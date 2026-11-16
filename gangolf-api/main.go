@@ -45,6 +45,10 @@ func bootstrap() (*server, string, error) {
 	if addr == "" {
 		addr = "127.0.0.1:8080"
 	}
+	s.player, err = configureOverlayPlayer(addr)
+	if err != nil {
+		return nil, "", err
+	}
 	return s, addr, nil
 }
 
@@ -74,20 +78,54 @@ func serve(handler *server, addr string) error {
 	if err != nil {
 		return err
 	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return errUnavailable
+	}
+	defer listener.Close()
+	var player net.Listener
+	if handler.player != nil {
+		player, err = net.Listen("tcp", handler.player.ListenAddr)
+		if err != nil {
+			return errUnavailable
+		}
+		defer player.Close()
+	}
+	return serveOverlayListeners(ctx, handler, listener, player)
+}
+
+func serveOverlayListeners(parent context.Context, handler *server, listener, player net.Listener) error {
+	ctx, stop := context.WithCancel(parent)
+	defer stop()
+	handler.matcher = newVideoMatcher(ctx)
+	go handler.runVideoMatcher(handler.matcher)
+	defer func() { stop(); <-handler.matcher.done }()
 	receiverDone := make(chan struct{})
 	go func() { defer close(receiverDone); handler.runTwitch(ctx) }()
 	defer func() { stop(); <-receiverDone }()
-	srv := &http.Server{Addr: addr, Handler: handler, BaseContext: func(net.Listener) context.Context { return ctx }, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 35 * time.Second, WriteTimeout: 35 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
-	done := make(chan error, 1)
-	go func() { done <- srv.ListenAndServe() }()
+	srv := &http.Server{Handler: handler, BaseContext: func(net.Listener) context.Context { return ctx }, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 35 * time.Second, WriteTimeout: 35 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	done := make(chan error, 2)
+	go func() { done <- srv.Serve(listener) }()
+	var clean *http.Server
+	if player != nil {
+		clean = &http.Server{Handler: handler.player, BaseContext: func(net.Listener) context.Context { return ctx }, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+		go func() { done <- clean.Serve(player) }()
+	}
+	defer func() {
+		stop()
+		handler.eventHub().shutdown()
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(shutdown)
+		if clean != nil {
+			clean.Shutdown(shutdown)
+		}
+	}()
 	select {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
-		handler.eventHub().shutdown()
-		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return srv.Shutdown(shutdown)
+		return nil
 	}
 }
 

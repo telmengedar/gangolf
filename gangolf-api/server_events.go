@@ -83,7 +83,7 @@ func acceptsEvents(raw string) bool {
 	return accepted
 }
 
-func (s *server) eventAuthorization(ctx context.Context, r *http.Request, video bool) (principal, *authConfig, int, string) {
+func (s *server) eventAuthorization(ctx context.Context, r *http.Request) (principal, *authConfig, int, string) {
 	ctx, cancel := context.WithTimeout(ctx, eventReadTimeout)
 	defer cancel()
 	token, query := credential(r)
@@ -104,21 +104,6 @@ func (s *server) eventAuthorization(ctx context.Context, r *http.Request, video 
 			code = "auth_unavailable"
 		}
 		return p, cfg, status, code
-	}
-	if video {
-		m := s.media
-		if m == nil {
-			return p, cfg, 503, "media_unavailable"
-		}
-
-		if err := lockMutex(ctx, &m.mu); err != nil {
-			return p, cfg, 503, "media_unavailable"
-		}
-		_, err = m.load(ctx)
-		m.mu.Unlock()
-		if err != nil {
-			return p, cfg, 503, "media_unavailable"
-		}
 	}
 	return p, cfg, 0, ""
 }
@@ -257,11 +242,28 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 func (s *server) freshEventAuthorization(ctx context.Context, r *http.Request, video bool, filter eventFilter) (principal, *authConfig, int, string) {
 	ctx, cancel := context.WithTimeout(ctx, eventReadTimeout)
 	defer cancel()
+	p, cfg, status, code := s.primaryEventAuthorization(ctx, r, filter)
+	if status != 0 || !video {
+		return p, cfg, status, code
+	}
+	media := s.media
+	if media == nil || lockMutex(ctx, &media.mu) != nil {
+		return p, cfg, 503, "media_unavailable"
+	}
+	_, err := media.load(ctx)
+	media.mu.Unlock()
+	if err != nil {
+		return p, cfg, 503, "media_unavailable"
+	}
+	return s.primaryEventAuthorization(ctx, r, filter)
+}
+
+func (s *server) primaryEventAuthorization(ctx context.Context, r *http.Request, filter eventFilter) (principal, *authConfig, int, string) {
 	if err := lockResources(ctx); err != nil {
 		return principal{}, nil, 503, "storage_unavailable"
 	}
 	defer resourceLock.Unlock()
-	p, cfg, status, code := s.eventAuthorization(ctx, r, video)
+	p, cfg, status, code := s.eventAuthorization(ctx, r)
 	if status != 0 {
 		return p, cfg, status, code
 	}
