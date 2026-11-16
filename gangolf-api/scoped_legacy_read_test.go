@@ -109,11 +109,16 @@ func TestScopedLegacyIssuanceRequiresTargetAssociation(t *testing.T) {
 				changeProfile(f, 30, func(p *twitchProfile) { p.BroadcasterUserID = "102" })
 			case "missing":
 				delete(f.nodes, 30)
-				f.edges = f.edges[:1]
+				edges := []relation{}
+				for _, edge := range f.edges {
+					if edge.Source != 30 && edge.Target != 30 {
+						edges = append(edges, edge)
+					}
+				}
+				f.edges = edges
 			case "conflicting":
-				p := provisionTwitch(t, f, 40, "8", "101")
+				provisionTwitch(t, f, 40, "8", "101")
 				changeProfile(f, 40, func(p *twitchProfile) { p.Enabled = new(true) })
-				_ = p
 			case "shared":
 				status(t, appRequest(t, s, "POST", "/api/v3/messages", "key.secret", eventLocalMessage("shared", "test")), 201)
 				for id, n := range f.nodes {
@@ -154,5 +159,24 @@ func TestScopedLegacyTupleChangeFailsClosed(t *testing.T) {
 	w := appRequest(t, s, "GET", "/api/v3/channels/31", read, "")
 	if w.Code < 400 {
 		t.Fatal("changed tuple retained scoped access")
+	}
+}
+
+func TestScopedLegacyIdleHeartbeatRevocation(t *testing.T) {
+	f, s := newResourceFixture(t)
+	provisionTwitch(t, f, 30, "7", "101")
+	changeProfile(f, 30, func(p *twitchProfile) { p.Enabled = new(true) })
+	read := issueAppTestToken(t, s, "7", `{"scope":"channel-read","channelIds":["31"]}`)
+	stream := openEventTestStream(t, eventTestHost(t, s), "", "types=message.created&apiKey="+url.QueryEscape(read))
+	f.mu.Lock()
+	changeProfile(f, 30, func(p *twitchProfile) { p.Enabled = new(false) })
+	f.mu.Unlock()
+	select {
+	case frame, ok := <-stream.frames:
+		if ok {
+			t.Fatalf("idle revoked stream emitted frame %q", frame)
+		}
+	case <-time.After(eventHeartbeat + 3*time.Second):
+		t.Fatal("idle revocation missed heartbeat")
 	}
 }

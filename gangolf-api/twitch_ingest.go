@@ -276,6 +276,9 @@ func (s *server) ingestTwitch(ctx context.Context, p twitchProfile, e twitchEven
 	}
 	committed = true
 	s.createdMessage(read.ID, stored)
+	if e.ChatterUserID != current.BotUserID {
+		s.scheduleVideo(read.ID)
+	}
 	return read.ID, nil
 }
 

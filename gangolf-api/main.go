@@ -74,6 +74,9 @@ func serve(handler *server, addr string) error {
 	if err != nil {
 		return err
 	}
+	handler.matcher = newVideoMatcher(ctx)
+	go handler.runVideoMatcher(handler.matcher)
+	defer func() { stop(); <-handler.matcher.done }()
 	receiverDone := make(chan struct{})
 	go func() { defer close(receiverDone); handler.runTwitch(ctx) }()
 	defer func() { stop(); <-receiverDone }()

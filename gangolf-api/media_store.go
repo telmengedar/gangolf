@@ -18,11 +18,12 @@ import (
 )
 
 type mediaStore struct {
-	graph     *graph
-	catalogID int64
-	tenant    string
-	authID    string
-	mu        sync.Mutex
+	graph      *graph
+	catalogID  int64
+	tenant     string
+	authID     string
+	mu         sync.Mutex
+	generation uint64
 }
 
 func mediaCredential(path string) (string, error) {
@@ -139,6 +140,7 @@ func (m *mediaStore) decode(n node) (mediaCatalog, error) {
 	return c, nil
 }
 func (m *mediaStore) save(ctx context.Context, c mediaCatalog) error {
+	m.generation++
 	data, err := json.Marshal(c)
 	if err != nil || len(data) > mediaCapacity {
 		return errMediaCapacity
