@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"embed"
+	"html/template"
 	"net/http"
 	"net/url"
 	"strings"
@@ -53,13 +55,15 @@ func (s *server) overlayHTTP(w http.ResponseWriter, r *http.Request) {
 			failure(w, 403, "forbidden")
 			return
 		}
+		if path == "video" && s.player == nil {
+			failure(w, 503, "player_unavailable")
+			return
+		}
 		name, kind = path+".html", "text/html; charset=utf-8"
-	case "shared.js", "chat.js", "video.js", "player.js":
+	case "shared.js", "chat.js", "video.js":
 		name, kind = path, "text/javascript; charset=utf-8"
 	case "overlay.css":
 		name, kind = path, "text/css; charset=utf-8"
-	case "player.html":
-		name, kind = path, "text/html; charset=utf-8"
 	default:
 		failure(w, 404, "not_found")
 		return
@@ -68,12 +72,33 @@ func (s *server) overlayHTTP(w http.ResponseWriter, r *http.Request) {
 		failure(w, 400, "invalid_filter")
 		return
 	}
+	policy := overlayPolicy
+	if path == "video" {
+		policy = strings.Replace(policy, "frame-src 'self'", "frame-src "+s.player.PlayerOrigin, 1)
+	}
+	serveOverlayAsset(w, name, kind, policy, s.player)
+}
+
+func serveOverlayAsset(w http.ResponseWriter, name, kind, policy string, origins *overlayPlayer) {
 	body, err := overlayAssets.ReadFile("overlays/" + name)
 	if err != nil {
 		failure(w, 404, "not_found")
 		return
 	}
-	w.Header().Set("Content-Security-Policy", overlayPolicy)
+	if strings.HasSuffix(name, ".html") && origins != nil {
+		page, err := template.New("overlay").Parse(string(body))
+		if err != nil {
+			failure(w, 503, "player_unavailable")
+			return
+		}
+		var rendered bytes.Buffer
+		if page.Execute(&rendered, origins) != nil {
+			failure(w, 503, "player_unavailable")
+			return
+		}
+		body = rendered.Bytes()
+	}
+	w.Header().Set("Content-Security-Policy", policy)
 	w.Header().Set("Content-Type", kind)
 	w.WriteHeader(200)
 	w.Write(body)

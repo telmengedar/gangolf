@@ -47,7 +47,7 @@ func (s *server) videoEvent(ctx context.Context, w http.ResponseWriter, r *http.
 		return
 	}
 	defer resourceLock.Unlock()
-	p, cfg, status, code := s.eventAuthorization(ctx, r, false)
+	p, cfg, status, code := s.eventAuthorization(ctx, r)
 	if status != 0 {
 		failure(w, status, code)
 		return

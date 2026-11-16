@@ -266,3 +266,20 @@ The worker has one goroutine, a 64-ID nonblocking queue and a three-second total
 Matching joins text and emote codes in chunk order, trims outer Unicode punctuation/whitespace, lowercases Unicode and collapses whitespace. Internal punctuation remains literal. A whole normalized trigger phrase must match the start or end with a token boundary: `hello` matches `HELLO!` and `say hello`, never `hellothere` or `say hello friend`; `hello world` matches `hello   world!`, never `hello, world`. The longest resolved phrase wins, with lowest numeric trigger ID resolving equal-length phrase conflicts. One resolved trigger row is selected uniformly among that winning phrase's rows, preserving duplicate weighting and variants. Unresolved references never match, and one message emits at most one automatic intent.
 
 The existing manual typed video endpoint keeps its independent catalog/source authorization and repeated-publication semantics. Video consumption does not grant catalog listing or publication authority. No media download, server playback or media proxy is added. Deployment reachability, request-query logging, browser/provider compatibility and OBS audio require separate operational validation; serving these pages does not establish a public access route.
+
+
+### Separate video player origin
+
+`/overlays/video?apiKey=<URL-encoded-read-token>` uses a separate, key-free player origin. Configure all three fields explicitly to enable it:
+
+| Environment field | Meaning |
+| --- | --- |
+| `GANGOLF_OVERLAY_PLAYER_LISTEN_ADDR` | Dedicated local TCP listen address; it need not equal an externally visible proxy address. |
+| `GANGOLF_OVERLAY_PLAYER_ORIGIN` | Trusted browser-visible HTTP(S) origin serving the clean player. |
+| `GANGOLF_OVERLAY_PARENT_ORIGIN` | Trusted browser-visible API/OBS parent origin. |
+
+All absent leaves chat available and returns authenticated `503 player_unavailable` for the video page. Partial, invalid, equal-origin or conflicting bind configuration fails startup; no origin is inferred from Host/forwarding headers. Supply literal origins without credentials, paths, queries or fragments. Canonicalization folds hostname/scheme case and removes default ports; the origins must still differ. The dedicated listener starts and stops with the API. It serves only `/overlays/player.html`, `/overlays/player.js` and `/overlays/overlay.css`, rejects query strings/Authorization and has no API routes. The main API never serves player HTML or JavaScript.
+
+The video parent retains the key in first-party controller state, embeds only the configured clean origin and sends only validated clip instructions across an exact-origin bridge. Both documents receive escaped nonsecret origin metadata. The child loads the official YouTube SDK under its own provider policy and sends clean-origin referrers; it cannot read the cross-origin parent's credentials. Actual origin mismatches stop before playback. The origin configuration does not install ingress, TLS, DNS or CORS or choose a public access route.
+
+Video event subscription checks primary credentials/channels before media work, validates media availability without holding the primary resource lock, then reloads primary authorization after the wait. Initial, data and heartbeat checks share the existing total ten-second read budget. Slow optional media cannot hold the resource lock through this consumer path; explicit catalog operations and manual typed publication retain their existing independent locking/latency behavior. Message-only streams do not gain a media dependency.

@@ -22,7 +22,11 @@ func (v videoTestTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 	}
-	response, err := v.base.RoundTrip(r)
+	base := v.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	response, err := base.RoundTrip(r)
 	if v.after != nil {
 		v.after(r)
 	}

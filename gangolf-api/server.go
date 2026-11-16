@@ -14,6 +14,7 @@ import (
 )
 
 type server struct {
+	player  *overlayPlayer
 	matcher *videoMatcher
 	events  *eventHub
 	media   *mediaStore

@@ -19,6 +19,7 @@ func TestOverlayHTMLRequiresScopedKeyAndFreshChannels(t *testing.T) {
 		t.Fatal("unsafe overlay document")
 	}
 	status(t, appRequest(t, s, "GET", path+"&service=Twitch&channel=101", "", ""), 200)
+	status(t, appRequest(t, s, "GET", strings.Replace(path, "/chat?", "/video?", 1), "", ""), 503)
 	status(t, appRequest(t, s, "GET", path+"&service=Twitch&channel=102", "", ""), 403)
 	for _, path := range []string{"/overlays/chat?apiKey=key.secret", "/overlays/chat?apiKey=invalid.secret", "/overlays/chat?apiKey=header.payload.signature", "/overlays/chat?apiKey=" + url.QueryEscape(read) + "&apiKey=" + url.QueryEscape(read)} {
 		w := appRequest(t, s, "GET", path, "", "")
