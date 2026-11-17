@@ -28,7 +28,7 @@ func TestMatchVideo_PunctuationIgnored_MatchesOnlyWholeEdgePhrase(t *testing.T) 
 		want bool
 	}{
 		{"wat 42", true}, {"WAT? 42! extra", true}, {"extra w.a.t 42?", true},
-		{"extra wat 42 extra", false}, {"water 42", false}, {"wat 420", false},
+		{"extra wat 42 extra", false}, {"water 42", false}, {"wat 420", false}, {"otherwat 42", false},
 		{"wat\t42", false}, {"???", false},
 	} {
 		t.Run(input.text, func(t *testing.T) {
