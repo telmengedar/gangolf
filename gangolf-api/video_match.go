@@ -7,7 +7,12 @@ import (
 )
 
 func normalizeVideoPhrase(text string) string {
-	text = strings.TrimFunc(text, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsPunct(r) })
+	text = strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == ' ' {
+			return r
+		}
+		return -1
+	}, text)
 	return strings.ToLower(strings.Join(strings.Fields(text), " "))
 }
 
