@@ -141,6 +141,21 @@ func TestAutomaticVideoProducerHooksAndReplay(t *testing.T) {
 	}
 }
 
+func TestMatchMessageVideo_PunctuatedCommittedMessage_PublishesEdgeTrigger(t *testing.T) {
+	for _, text := range []string{"WAT?", "WaT? extra", "extra w.a.t?"} {
+		t.Run(text, func(t *testing.T) {
+			media, _, s, sub, _ := automaticVideoFixture(t)
+			catalog := media.state(t)
+			catalog.Triggers[0].Text = "wat"
+			media.set(catalog)
+			message := createAutomaticMessage(t, s, text)
+			s.matchMessageVideo(context.Background(), mustResourceID(message.ID), func(int) int { return 0 })
+			expectAutomaticVideo(t, sub, message.ID)
+			noAutomaticVideo(t, sub)
+		})
+	}
+}
+
 func TestAutomaticVideoOutboundNeverScheduled(t *testing.T) {
 	_, s, tw := outboundFixture(t)
 	s.matcher = newVideoMatcher(context.Background())

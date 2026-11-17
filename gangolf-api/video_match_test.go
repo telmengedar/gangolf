@@ -2,13 +2,54 @@ package main
 
 import "testing"
 
+func TestNormalizeVideoPhrase_NonAlphanumericInput_RetainsLettersDigitsAndSpaces(t *testing.T) {
+	for _, input := range []struct {
+		text string
+		want string
+	}{
+		{" W.A-T?  42! ", "wat 42"},
+		{"GRÜßE世界١٢", "grüße世界١٢"},
+		{"wat\t42\nnow\r\u00a0please", "wat42nowplease"},
+		{"wat💥+_=42", "wat42"},
+		{"?!💥\t\n", ""},
+	} {
+		t.Run(input.text, func(t *testing.T) {
+			if got := normalizeVideoPhrase(input.text); got != input.want {
+				t.Fatalf("normalized=%q, want %q", got, input.want)
+			}
+		})
+	}
+}
+
+func TestMatchVideo_PunctuationIgnored_MatchesOnlyWholeEdgePhrase(t *testing.T) {
+	c := mediaCatalog{Clips: []mediaClip{{ID: "1"}}, Triggers: []mediaTrigger{{ID: "1", Text: "W.A-T? 42!", ClipID: new("1")}}}
+	for _, input := range []struct {
+		text string
+		want bool
+	}{
+		{"wat 42", true}, {"WAT? 42! extra", true}, {"extra w.a.t 42?", true},
+		{"extra wat 42 extra", false}, {"water 42", false}, {"wat 420", false}, {"otherwat 42", false},
+		{"wat\t42", false}, {"???", false},
+	} {
+		t.Run(input.text, func(t *testing.T) {
+			trigger, clip, ok := matchVideo(c, normalizeVideoPhrase(input.text), func(int) int { return 0 })
+			if ok != input.want || ok && (trigger.ID != "1" || clip.ID != "1") {
+				t.Fatalf("match=%t trigger=%q clip=%q", ok, trigger.ID, clip.ID)
+			}
+		})
+	}
+	if got := messageVideoText(messageContent{Chunks: []chunk{{Type: 0, Data: "W."}, {Type: 1, Code: "A-T?"}, {Type: 0, Data: " 42!"}}}); got != "wat 42" {
+		t.Fatalf("chunk text=%q", got)
+	}
+}
+
 func TestVideoPhraseMatching(t *testing.T) {
 	c := mediaCatalog{Clips: []mediaClip{{ID: "1", RemoteVideoID: "abcdefghijk"}}, Triggers: []mediaTrigger{{ID: "1", Text: "hello", ClipID: new("1")}}}
 	for _, input := range []struct {
 		text string
 		want bool
 	}{
-		{"HELLO!", true}, {"hello there", true}, {"say hello", true}, {"say hello friend", false}, {"hellothere", false}, {"", false}, {"!!!", false}, {"hello\tthere", true}, {"hello\nthere", true}, {"“HELLO”", true},
+		{"HELLO!", true}, {"hello there", true}, {"say hello", true}, {"say hello friend", false}, {"hellothere", false}, {"", false}, {"!!!", false}, {"hello\tthere", false}, {"hello\nthere", false}, {"“HELLO”", true},
 	} {
 		t.Run(input.text, func(t *testing.T) {
 			_, _, ok := matchVideo(c, normalizeVideoPhrase(input.text), func(int) int { return 0 })
@@ -21,7 +62,7 @@ func TestVideoPhraseMatching(t *testing.T) {
 	for _, input := range []struct {
 		text string
 		want bool
-	}{{"hello   WORLD!", true}, {"say hello world", true}, {"hello, world", false}, {"hello world friend", true}, {"other hello world friend", false}} {
+	}{{"hello   WORLD!", true}, {"say hello world", true}, {"hello, world", true}, {"hello world friend", true}, {"other hello world friend", false}} {
 		_, _, ok := matchVideo(c, normalizeVideoPhrase(input.text), func(int) int { return 0 })
 		if ok != input.want {
 			t.Fatalf("phrase %q match=%t", input.text, ok)
