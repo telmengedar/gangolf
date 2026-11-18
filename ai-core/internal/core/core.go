@@ -256,6 +256,7 @@ func (c *Core) turn(ctx context.Context, key window.Key) bool {
 		if errors.As(err, &submission) {
 			c.logTurn(key, batch, took, len(text), false, "submitted")
 			c.log.Info("submitted; visibility unconfirmed", "channel", key.Channel, "id", submission.ID, "requestKey", submission.RequestKey)
+			c.offerMemory(ctx, key, batch, text)
 			return true
 		}
 		c.logTurn(key, batch, took, len(text), false, "post-failed")

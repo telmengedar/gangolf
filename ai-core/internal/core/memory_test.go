@@ -105,6 +105,47 @@ func TestMemoryReviewUsesTrustedInputHistoryAfterFinalSanitizedRetry(t *testing.
 	}
 }
 
+func TestRun_IRCSubmitted_ReviewsTrustedInputWithoutConfirmingDelivery(t *testing.T) {
+	r := newRig(t)
+	reviewer := &fakeReviewer{calls: make(chan reviewCall, 4)}
+	r.messages.postErr = &messages.UnconfirmedSubmission{ID: "77", RequestKey: "safe-key"}
+	r.messages.add(channel, "Mara", "earlier input", start.Add(-time.Minute))
+	r.messages.add(channel, "GangolfBot", "old answer", start.Add(-time.Minute+time.Second))
+	r.runner.results = []processor.Result{{Reply: "old answer"}, {Reply: " !! Gangolf: final accepted answer "}}
+	logs := &memoryLog{}
+	c := core.New(core.Config{Routes: selfRoutes(channel), BotName: "GangolfBot", Interval: time.Nanosecond, MemoryReviewer: reviewer}, r.messages, r.runner, slog.New(slog.NewTextHandler(logs, nil)), func() time.Time { return r.clock })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var got reviewCall
+	r.messages.onList = func(n int) {
+		switch n {
+		case 2:
+			r.messages.add(channel, "Mara", "Kappa means sarcasm here", r.clock)
+		case 3:
+			r.advance(3 * time.Second)
+		case 4:
+			got = receiveReview(t, reviewer.calls)
+		case 6:
+			cancel()
+		}
+	}
+	finishes(t, "core did not stop", func() { c.Run(ctx) })
+	if len(r.runner.calls) != 2 || len(r.messages.posts) != 1 || r.messages.posts[0].text != "final accepted answer" {
+		t.Fatalf("runs=%d posts=%+v", len(r.runner.calls), r.messages.posts)
+	}
+	if !reflect.DeepEqual(got.lines, []window.Utterance{{Speaker: "Mara", Text: "Kappa means sarcasm here"}}) || !reflect.DeepEqual(got.history, r.runner.calls[0].history) {
+		t.Fatalf("review=%+v history=%+v", got, r.runner.calls[0].history)
+	}
+	if strings.Count(logs.String(), "outcome=queued") != 1 || !strings.Contains(logs.String(), "outcome=submitted") || !strings.Contains(logs.String(), "submitted; visibility unconfirmed") || strings.Contains(logs.String(), "outcome=replied") || strings.Contains(logs.String(), "delivery confirmed") || strings.Contains(logs.String(), "post failed") {
+		t.Fatalf("logs=%s", logs.String())
+	}
+	select {
+	case extra := <-reviewer.calls:
+		t.Fatalf("unexpected extra review=%+v", extra)
+	default:
+	}
+}
+
 func TestUndeliveredTurnsNeverQueueMemoryReview(t *testing.T) {
 	cases := []struct {
 		name            string
@@ -118,7 +159,7 @@ func TestUndeliveredTurnsNeverQueueMemoryReview(t *testing.T) {
 		{name: "withheld", result: processor.Result{Silent: true, Failed: true, Reply: "fallback"}},
 		{name: "empty", result: processor.Result{Reply: " !! Gangolf: "}},
 		{name: "run failure", runErr: errors.New("failed")},
-		{name: "IRC submitted", result: processor.Result{Reply: "a reply"}, postErr: &messages.UnconfirmedSubmission{ID: "77", RequestKey: "safe-key"}},
+		{name: "delivery unknown", result: processor.Result{Reply: "a reply"}, postErr: errors.New("delivery_outcome_unknown")},
 		{name: "post failure", result: processor.Result{Reply: "a reply"}, postErr: errors.New("failed")},
 		{name: "repeat withheld", result: processor.Result{Reply: "old answer"}, retry: true},
 		{name: "too short", input: "hi", minimum: 4, result: processor.Result{Reply: "a reply"}},
@@ -152,11 +193,8 @@ func TestUndeliveredTurnsNeverQueueMemoryReview(t *testing.T) {
 				}
 			}
 			finishes(t, "core did not stop", func() { c.Run(ctx) })
-			if tc.name == "IRC submitted" && (len(r.runner.calls) != 1 || len(r.messages.posts) != 1) {
-				t.Fatalf("submission scenario runs=%d posts=%d", len(r.runner.calls), len(r.messages.posts))
-			}
-			if tc.name == "IRC submitted" && !strings.Contains(logs.String(), "outcome=submitted") {
-				t.Fatalf("submission outcome missing: %s", logs.String())
+			if tc.postErr != nil && (len(r.runner.calls) != 1 || len(r.messages.posts) != 1 || !strings.Contains(logs.String(), "outcome=post-failed")) {
+				t.Fatalf("failed post scenario runs=%d posts=%d logs=%s", len(r.runner.calls), len(r.messages.posts), logs.String())
 			}
 			if strings.Contains(logs.String(), "memory review") {
 				t.Fatalf("undelivered turn offered private review: %s", logs.String())
@@ -288,28 +326,39 @@ func TestQueuedReviewFreezesHistoryBeforeTheWorkerCanDispatchIt(t *testing.T) {
 }
 
 func TestCancellationAfterPublicPostPreventsReviewDispatch(t *testing.T) {
-	r := newRig(t)
-	reviewer := &fakeReviewer{calls: make(chan reviewCall, 4)}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	r.messages.onPost = cancel
-	c := core.New(core.Config{Routes: selfRoutes(channel), BotName: "GangolfBot", Interval: time.Nanosecond, MemoryReviewer: reviewer}, r.messages, r.runner, slog.New(slog.NewTextHandler(io.Discard, nil)), func() time.Time { return r.clock })
-	r.messages.onList = func(n int) {
-		switch n {
-		case 2:
-			r.messages.add(channel, "Mara", "hello", r.clock)
-		case 3:
-			r.advance(3 * time.Second)
-		}
-	}
-	finishes(t, "core did not stop", func() { c.Run(ctx) })
-	if len(r.messages.posts) != 1 {
-		t.Fatalf("posts=%+v", r.messages.posts)
-	}
-	select {
-	case got := <-reviewer.calls:
-		t.Fatalf("review dispatched after cancellation: %+v", got)
-	default:
+	for _, tc := range []struct {
+		name    string
+		postErr error
+	}{
+		{name: "confirmed"},
+		{name: "IRC submitted", postErr: &messages.UnconfirmedSubmission{ID: "77", RequestKey: "safe-key"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			r.messages.postErr = tc.postErr
+			reviewer := &fakeReviewer{calls: make(chan reviewCall, 4)}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			r.messages.onPost = cancel
+			c := core.New(core.Config{Routes: selfRoutes(channel), BotName: "GangolfBot", Interval: time.Nanosecond, MemoryReviewer: reviewer}, r.messages, r.runner, slog.New(slog.NewTextHandler(io.Discard, nil)), func() time.Time { return r.clock })
+			r.messages.onList = func(n int) {
+				switch n {
+				case 2:
+					r.messages.add(channel, "Mara", "hello", r.clock)
+				case 3:
+					r.advance(3 * time.Second)
+				}
+			}
+			finishes(t, "core did not stop", func() { c.Run(ctx) })
+			if len(r.messages.posts) != 1 {
+				t.Fatalf("posts=%+v", r.messages.posts)
+			}
+			select {
+			case got := <-reviewer.calls:
+				t.Fatalf("review dispatched after cancellation: %+v", got)
+			default:
+			}
+		})
 	}
 }
 
