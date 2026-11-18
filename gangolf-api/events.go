@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"strconv"
 	"sync"
 	"time"
@@ -175,6 +176,7 @@ func (s *server) publishEvent(kind, service, channel string, channelID *string, 
 			continue
 		}
 		if len(frame.bytes) > eventBytes || sub.bytes+len(frame.bytes) > eventBytes || len(sub.queue) == eventQueue {
+			slog.Warn("event subscriber overflow", "reason", "queue_full", "queued", len(sub.queue), "queuedBytes", sub.bytes)
 			h.removeLocked(sub)
 			continue
 		}

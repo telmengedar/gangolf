@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"math/rand/v2"
 	"strconv"
 	"sync/atomic"
@@ -13,7 +13,7 @@ const videoMatchQueue = 64
 const videoMatchTimeout = 3 * time.Second
 
 type videoMatcher struct {
-	queue   chan int64
+	queue   chan videoMatchAttempt
 	done    chan struct{}
 	context context.Context
 	choose  func(int) int
@@ -21,19 +21,24 @@ type videoMatcher struct {
 }
 
 func newVideoMatcher(ctx context.Context) *videoMatcher {
-	return &videoMatcher{queue: make(chan int64, videoMatchQueue), done: make(chan struct{}), context: ctx, choose: rand.IntN}
+	return &videoMatcher{queue: make(chan videoMatchAttempt, videoMatchQueue), done: make(chan struct{}), context: ctx, choose: rand.IntN}
 }
 
-func (s *server) scheduleVideo(id int64) {
+func (s *server) scheduleVideo(id int64, profiles ...twitchProfile) {
 	m := s.matcher
 	if m == nil || m.context.Err() != nil {
 		return
 	}
+	attempt := videoMatchAttempt{id: id, enqueued: time.Now()}
+	if len(profiles) > 0 {
+		profile := profiles[0]
+		attempt.profile = &profile
+	}
 	select {
-	case m.queue <- id:
+	case m.queue <- attempt:
 	default:
 		if m.dropped.Add(1) == 1 {
-			log.Print("gangolf-api: automatic video queue full")
+			slog.Warn("automatic video queue full", "reason", "queue_full", "queued", len(m.queue), "dropped", m.dropped.Load())
 		}
 	}
 }
@@ -44,46 +49,60 @@ func (s *server) runVideoMatcher(m *videoMatcher) {
 		select {
 		case <-m.context.Done():
 			return
-		case id := <-m.queue:
+		case attempt := <-m.queue:
+			started := time.Now()
 			ctx, cancel := context.WithTimeout(m.context, videoMatchTimeout)
-			s.matchMessageVideo(ctx, id, m.choose)
+			outcome := s.matchMessageVideo(ctx, attempt.id, m.choose, attempt.profile)
+			if outcome != "published" && ctx.Err() != nil {
+				outcome = "canceled"
+				if m.context.Err() == nil {
+					outcome = "deadline"
+				}
+			}
 			cancel()
+			slog.Debug("automatic video attempt", "messageId", attempt.id, "queueWaitMs", started.Sub(attempt.enqueued).Milliseconds(), "durationMs", time.Since(started).Milliseconds(), "outcome", outcome)
 		}
 	}
 }
 
-func (s *server) matchMessageVideo(ctx context.Context, id int64, choose func(int) int) {
+func (s *server) matchMessageVideo(ctx context.Context, id int64, choose func(int) int, original *twitchProfile) string {
 	media := s.media
 	if media == nil || lockMutex(ctx, &media.mu) != nil {
-		return
+		return "media_unavailable"
 	}
 	catalog, err := media.load(ctx)
 	generation := media.generation
 	media.mu.Unlock()
-	if err != nil || lockResources(ctx) != nil {
-		return
+	if err != nil {
+		return "media_unavailable"
+	}
+	if lockResources(ctx) != nil {
+		return "source_unavailable"
 	}
 	defer resourceLock.Unlock()
 	cfg, err := s.graph.loadConfig(ctx)
 	if err != nil {
-		return
+		return "source_unavailable"
 	}
 	user, ok := cfg.Users[media.tenant]
 	if !ok || !user.Enabled || !hasHost(user.Permissions) {
-		return
+		return "source_unauthorized"
 	}
 	source, found, err := s.videoSource(ctx, cfg, id)
-	if err != nil || !found || source.Delivery != nil {
-		return
+	if err != nil || !found {
+		return "source_unavailable"
+	}
+	if source.Delivery != nil && !s.outboundVideoAllowed(ctx, cfg, source, original) {
+		return "source_unauthorized"
 	}
 	tenant, status := s.boundPrincipal(ctx, cfg, principal{UserID: media.tenant, Permissions: []string{"host"}, ManagedOnly: user.ManagedOnly})
 	if status != 0 {
-		return
+		return "source_unauthorized"
 	}
 	policy := s.policy(tenant, cfg)
 	allowed, err := policy.scopedReadChannel(ctx, source.ChannelID, true)
 	if err != nil || !allowed {
-		return
+		return "source_unauthorized"
 	}
 	if source.Source != nil {
 		eligible := false
@@ -93,16 +112,26 @@ func (s *server) matchMessageVideo(ctx context.Context, id int64, choose func(in
 			}
 		}
 		if !eligible {
-			return
+			return "source_unauthorized"
 		}
 	}
 	trigger, clip, matched := matchVideo(catalog, messageVideoText(source), choose)
-	if !matched || ctx.Err() != nil || !media.mu.TryLock() {
-		return
+	if !matched {
+		return "no_match"
+	}
+	if ctx.Err() != nil {
+		return "deadline"
+	}
+	if !media.mu.TryLock() {
+		return "media_busy"
 	}
 	defer media.mu.Unlock()
-	if media.generation != generation || ctx.Err() != nil {
-		return
+	if media.generation != generation {
+		return "snapshot_changed"
+	}
+	if ctx.Err() != nil {
+		return "deadline"
 	}
 	s.publishVideo(strconv.FormatInt(id, 10), source, trigger, clip)
+	return "published"
 }

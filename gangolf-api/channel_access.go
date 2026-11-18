@@ -117,6 +117,9 @@ func (p messagePolicy) allowed(ctx context.Context, service, channel, id string,
 	if err != nil {
 		return false, err
 	}
+	if service != "" && identity.Service != service || channel != "" && identity.Channel != channel {
+		return false, nil
+	}
 	if p.principal.Scope == "channel-read" {
 		if !permissionsContain(p.principal.ChannelIDs, strconv.FormatInt(n.ID, 10)) {
 			return false, nil

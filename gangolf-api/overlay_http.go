@@ -46,7 +46,7 @@ func (s *server) overlayHTTP(w http.ResponseWriter, r *http.Request) {
 		request.URL = &authURL
 		ctx, cancel := context.WithTimeout(r.Context(), eventReadTimeout)
 		defer cancel()
-		p, _, status, code := s.freshEventAuthorization(ctx, request, false, filter)
+		p, _, status, code := s.freshEventAuthorization(ctx, request, false, filter, nil)
 		if status != 0 {
 			failure(w, status, code)
 			return
