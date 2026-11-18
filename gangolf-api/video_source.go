@@ -1,6 +1,26 @@
 package main
 
-import "context"
+import (
+	"context"
+	"strconv"
+)
+
+func (s *server) outboundVideoAllowed(ctx context.Context, cfg *authConfig, source messageContent, original *twitchProfile) bool {
+	d := source.Delivery
+	if original == nil || !d.videoSuccess() {
+		return false
+	}
+	user, ok := cfg.Users[d.AuthUserID]
+	if !ok || !user.Enabled || !hasHost(user.Permissions) {
+		return false
+	}
+	actor, status := s.boundPrincipal(ctx, cfg, principal{UserID: d.AuthUserID, Permissions: user.Permissions, ManagedOnly: user.ManagedOnly})
+	if status != 0 {
+		return false
+	}
+	profile, ok := selectOutbound(cfg, s.graph.config, actor, source.Channel)
+	return ok && sameReceiver(profile, *original) && strconv.FormatInt(profile.id, 10) == d.ConfigID && profile.TenantUserID == s.media.tenant && profile.ChannelID == source.ChannelID && profile.Transport == d.Transport && s.twitchChannelAllowed(ctx, cfg, profile) == nil
+}
 
 func (s *server) videoSource(ctx context.Context, cfg *authConfig, id int64) (messageContent, bool, error) {
 	rows, err := s.graph.queryResourceItem(ctx, "message", "", cfg.serviceOwner, s.graph.group, id)

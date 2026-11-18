@@ -17,6 +17,10 @@ type twitchDelivery struct {
 	Code       string `json:"code,omitempty"`
 }
 
+func (d *twitchDelivery) videoSuccess() bool {
+	return d.Transport == "irc" && d.State == "submitted" || d.Transport == "" && d.State == "sent"
+}
+
 func validRequestKey(key string) bool {
 	if len(key) == 0 || len(key) > 128 {
 		return false

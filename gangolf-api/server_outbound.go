@@ -174,5 +174,8 @@ func (s *server) createTwitchOutbound(ctx context.Context, w http.ResponseWriter
 		return
 	}
 	m.Delivery = stored.Delivery
+	if stored.Delivery.videoSuccess() {
+		s.scheduleVideo(id, selected)
+	}
 	respond(w, 201, m.resource(id))
 }

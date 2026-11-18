@@ -255,6 +255,7 @@ func TestCreateV3_TenantAndProfileAuthorization_DeniesUnboundTargets(t *testing.
 
 func TestCreateV3_ConcurrentAndRestartReplay_UsesOneAttempt(t *testing.T) {
 	_, s, tw := outboundFixture(t)
+	s.matcher = newVideoMatcher(context.Background())
 	entered, release := make(chan struct{}, 1), make(chan struct{})
 	var unblock sync.Once
 	defer unblock.Do(func() { close(release) })
@@ -287,10 +288,16 @@ func TestCreateV3_ConcurrentAndRestartReplay_UsesOneAttempt(t *testing.T) {
 	if sends(tw) != 1 {
 		t.Fatal("concurrent replay sent again")
 	}
+	if len(s.matcher.queue) != 0 {
+		t.Fatal("pending reservation or concurrent replay scheduled video")
+	}
 	unblock.Do(func() { close(release) })
 	w := <-first
 	status(t, w, 201)
 	sent := outboundResource(t, w, "sent")
+	if len(s.matcher.queue) != 1 {
+		t.Fatal("original successful completion did not schedule exactly once")
+	}
 	if pending.ID != sent.ID {
 		t.Fatal("key produced different nodes")
 	}
@@ -300,7 +307,7 @@ func TestCreateV3_ConcurrentAndRestartReplay_UsesOneAttempt(t *testing.T) {
 	w = outboundRequest(restarted, "key.secret", "same-key", outboundBody)
 	status(t, w, 200)
 	replay := outboundResource(t, w, "sent")
-	if replay.ID != sent.ID || sends(tw) != 1 {
+	if replay.ID != sent.ID || sends(tw) != 1 || len(s.matcher.queue) != 1 {
 		t.Fatal("restart replay made another attempt")
 	}
 }

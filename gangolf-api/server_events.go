@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
@@ -173,12 +174,11 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer h.remove(sub)
-	p, initial, status, code := s.freshEventAuthorization(ctx, r, filter.types["video.triggered"], filter)
+	p, _, status, code := s.freshEventAuthorization(ctx, r, filter.types["video.triggered"], filter, nil)
 	if status != 0 {
 		failure(w, status, code)
 		return
 	}
-	_ = initial
 	if !h.bind(sub, p.UserID) {
 		failure(w, 429, "stream_limit")
 		return
@@ -194,6 +194,9 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	if !writeEventFrame(w, control, []byte("event: stream.ready\ndata: {\"schemaVersion\":1,\"replay\":false,\"resyncRequired\":true}\n\n")) {
 		return
 	}
+	slog.Debug("event stream ready", "replay", false)
+	reason := "disconnected"
+	defer func() { slog.Debug("event stream closed", "reason", reason) }()
 	ticker := time.NewTicker(eventHeartbeat)
 	defer ticker.Stop()
 	for {
@@ -203,6 +206,7 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return
 		case <-sub.done:
+			reason = "subscriber_closed"
 			return
 		case frame = <-sub.queue:
 			if !h.consume(sub, frame) {
@@ -211,82 +215,98 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			data = true
 		case <-ticker.C:
 		}
-		p, cfg, status, _ := s.freshEventAuthorization(ctx, r, filter.types["video.triggered"], filter)
+		var source *eventEnvelope
+		if data {
+			source = &frame.envelope
+		}
+		p, allowed, status, code := s.freshEventAuthorization(ctx, r, filter.types["video.triggered"], filter, source)
 		if status != 0 || p.UserID != sub.user || !h.active(sub) {
+			reason = "authorization_failed"
+			if status != 0 {
+				reason = code
+			}
 			return
 		}
 		if data {
-			channelID := ""
-			if frame.envelope.ChannelID != nil {
-				channelID = *frame.envelope.ChannelID
-			}
-			check, done := context.WithTimeout(ctx, eventReadTimeout)
-			allowed, err := s.policy(p, cfg).allowed(check, frame.envelope.Service, frame.envelope.Channel, channelID, true)
-			done()
-			if err != nil {
-				return
-			}
 			if !allowed {
+				slog.Debug("event frame suppressed", "reason", "source_unauthorized")
 				continue
 			}
 
 			if !writeEventFrame(w, control, frame.bytes) {
+				reason = "write_failed"
 				return
 			}
 		} else if !writeEventFrame(w, control, []byte(": heartbeat\n\n")) {
+			reason = "write_failed"
 			return
 		}
 	}
 }
 
-func (s *server) freshEventAuthorization(ctx context.Context, r *http.Request, video bool, filter eventFilter) (principal, *authConfig, int, string) {
+func (s *server) freshEventAuthorization(ctx context.Context, r *http.Request, video bool, filter eventFilter, source *eventEnvelope) (principal, bool, int, string) {
 	ctx, cancel := context.WithTimeout(ctx, eventReadTimeout)
 	defer cancel()
-	p, cfg, status, code := s.primaryEventAuthorization(ctx, r, filter)
+	initialSource := source
+	if video {
+		initialSource = nil
+	}
+	p, allowed, status, code := s.primaryEventAuthorization(ctx, r, filter, initialSource)
 	if status != 0 || !video {
-		return p, cfg, status, code
+		return p, allowed, status, code
 	}
 	media := s.media
 	if media == nil || lockMutex(ctx, &media.mu) != nil {
-		return p, cfg, 503, "media_unavailable"
+		return p, false, 503, "media_unavailable"
 	}
 	_, err := media.load(ctx)
 	media.mu.Unlock()
 	if err != nil {
-		return p, cfg, 503, "media_unavailable"
+		return p, false, 503, "media_unavailable"
 	}
-	return s.primaryEventAuthorization(ctx, r, filter)
+	return s.primaryEventAuthorization(ctx, r, filter, source)
 }
 
-func (s *server) primaryEventAuthorization(ctx context.Context, r *http.Request, filter eventFilter) (principal, *authConfig, int, string) {
+func (s *server) primaryEventAuthorization(ctx context.Context, r *http.Request, filter eventFilter, source *eventEnvelope) (principal, bool, int, string) {
 	if err := lockResources(ctx); err != nil {
-		return principal{}, nil, 503, "storage_unavailable"
+		return principal{}, false, 503, "storage_unavailable"
 	}
 	defer resourceLock.Unlock()
 	p, cfg, status, code := s.eventAuthorization(ctx, r)
 	if status != 0 {
-		return p, cfg, status, code
+		return p, false, status, code
 	}
 	policy := s.policy(p, cfg)
 	if filter.channel != "" {
 		allowed, err := policy.allowed(ctx, filter.service, filter.channel, "", true)
 		if err != nil {
-			return p, cfg, 503, "storage_unavailable"
+			return p, false, 503, "storage_unavailable"
 		}
 		if !allowed {
-			return p, cfg, 403, "forbidden"
+			return p, false, 403, "forbidden"
 		}
 	}
 	if p.Scope == "channel-read" {
 		for _, id := range p.ChannelIDs {
 			allowed, err := policy.allowed(ctx, "", "", id, true)
 			if err != nil {
-				return p, cfg, 503, "storage_unavailable"
+				return p, false, 503, "storage_unavailable"
 			}
 			if !allowed {
-				return p, cfg, 403, "forbidden"
+				return p, false, 403, "forbidden"
 			}
 		}
 	}
-	return p, cfg, 0, ""
+	if source != nil {
+		channelID := ""
+		if source.ChannelID != nil {
+			channelID = *source.ChannelID
+		}
+		allowed, err := policy.allowed(ctx, source.Service, source.Channel, channelID, true)
+		if err != nil {
+			return p, false, 503, "storage_unavailable"
+		}
+		return p, allowed, 0, ""
+	}
+	return p, true, 0, ""
 }

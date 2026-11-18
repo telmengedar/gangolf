@@ -36,12 +36,16 @@ func TestIRCOutboundReservationBeforeWriteAndPartialOutcome(t *testing.T) {
 	for _, limit := range []int{-1, 4} {
 		t.Run(map[int]string{-1: "full", 4: "partial"}[limit], func(t *testing.T) {
 			f, s, tw, p := ircProfileFixture(t)
+			s.matcher = newVideoMatcher(context.Background())
 			a, b := net.Pipe()
 			defer a.Close()
 			defer b.Close()
 			var calls atomic.Int64
 			connection := &twitchIRCWriteFault{Conn: a, limit: limit, beforeWrite: func() {
 				calls.Add(1)
+				if len(s.matcher.queue) != 0 {
+					t.Error("reservation scheduled video before write")
+				}
 				f.mu.Lock()
 				defer f.mu.Unlock()
 				count := 0
@@ -85,10 +89,17 @@ func TestIRCOutboundReservationBeforeWriteAndPartialOutcome(t *testing.T) {
 			if calls.Load() != 1 {
 				t.Fatal("frame written more than once")
 			}
+			expectedVideo := 0
+			if state == "submitted" {
+				expectedVideo = 1
+			}
+			if len(s.matcher.queue) != expectedVideo {
+				t.Fatal("video admission does not match durable outcome")
+			}
 			replay := outboundRequest(s, "key.secret", "write-outcome", outboundBody)
 			status(t, replay, 200)
 			m := outboundResource(t, replay, state)
-			if m.Delivery.Transport != "irc" || m.Delivery.MessageID != "" || calls.Load() != 1 {
+			if m.Delivery.Transport != "irc" || m.Delivery.MessageID != "" || calls.Load() != 1 || len(s.matcher.queue) != expectedVideo {
 				t.Fatal("replay changed outcome or resent")
 			}
 		})
@@ -99,6 +110,7 @@ func TestIRCTerminalPersistenceAmbiguity(t *testing.T) {
 	for _, mode := range []string{"no-commit", "lost-ack", "readback-fail"} {
 		t.Run(mode, func(t *testing.T) {
 			f, s, tw, p := ircProfileFixture(t)
+			s.matcher = newVideoMatcher(context.Background())
 			fake := newIRCFake(t, tw.client, ircWelcome)
 			_, _ = startIRCFixture(t, s, p)
 			waitIRCReady(t, s, p)
@@ -152,10 +164,16 @@ func TestIRCTerminalPersistenceAmbiguity(t *testing.T) {
 			if stored.Delivery.State != expected {
 				t.Fatalf("durable state=%s", stored.Delivery.State)
 			}
+			if len(s.matcher.queue) != 0 {
+				t.Fatal("unconfirmed terminal write scheduled video")
+			}
 			readFailure.Store(false)
 			replay := outboundRequest(restartOutbound(s), "key.secret", "terminal-irc", outboundBody)
 			status(t, replay, 200)
 			outboundResource(t, replay, expected)
+			if len(s.matcher.queue) != 0 {
+				t.Fatal("uncertain original completion was backfilled on replay")
+			}
 			status(t, request(t, s, "GET", deliveryLocation(mustResourceID(failure["id"])), "key.secret", ""), 200)
 			assertNoIRCFrame(t, fake)
 		})

@@ -149,14 +149,14 @@ func TestMatchMessageVideo_PunctuatedCommittedMessage_PublishesEdgeTrigger(t *te
 			catalog.Triggers[0].Text = "wat"
 			media.set(catalog)
 			message := createAutomaticMessage(t, s, text)
-			s.matchMessageVideo(context.Background(), mustResourceID(message.ID), func(int) int { return 0 })
+			s.matchMessageVideo(context.Background(), mustResourceID(message.ID), func(int) int { return 0 }, nil)
 			expectAutomaticVideo(t, sub, message.ID)
 			noAutomaticVideo(t, sub)
 		})
 	}
 }
 
-func TestAutomaticVideoOutboundNeverScheduled(t *testing.T) {
+func TestScheduleVideo_SuccessfulOutbound_QueuesOneAttempt(t *testing.T) {
 	_, s, tw := outboundFixture(t)
 	s.matcher = newVideoMatcher(context.Background())
 	tw.send = func(w http.ResponseWriter, r *http.Request) {
@@ -165,8 +165,8 @@ func TestAutomaticVideoOutboundNeverScheduled(t *testing.T) {
 	w := outboundRequest(s, "key.secret", "video-outbound", outboundBody)
 	status(t, w, 201)
 	outboundResource(t, w, "sent")
-	if sends(tw) != 1 || len(s.matcher.queue) != 0 {
-		t.Fatal("outbound scheduled video")
+	if sends(tw) != 1 || len(s.matcher.queue) != 1 {
+		t.Fatal("outbound did not schedule one video")
 	}
 }
 
@@ -203,7 +203,7 @@ func TestAutomaticVideoUnavailableAndIneligibleSource(t *testing.T) {
 				c.Triggers = nil
 				media.set(c)
 			}
-			s.matchMessageVideo(context.Background(), id, func(int) int { return 0 })
+			s.matchMessageVideo(context.Background(), id, func(int) int { return 0 }, nil)
 			noAutomaticVideo(t, sub)
 		})
 	}
@@ -230,7 +230,7 @@ func TestAutomaticVideoQueueBoundAndContext(t *testing.T) {
 	defer cancel()
 	s.media.mu.Lock()
 	done := make(chan struct{})
-	go func() { s.matchMessageVideo(ctx, 1, func(int) int { return 0 }); close(done) }()
+	go func() { s.matchMessageVideo(ctx, 1, func(int) int { return 0 }, nil); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -259,7 +259,7 @@ func TestAutomaticSlowMediaDoesNotBlockDurableChat(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), videoMatchTimeout)
 		defer cancel()
-		s.matchMessageVideo(ctx, mustResourceID(first.ID), func(int) int { return 0 })
+		s.matchMessageVideo(ctx, mustResourceID(first.ID), func(int) int { return 0 }, nil)
 		close(done)
 	}()
 	<-started
@@ -300,7 +300,7 @@ func TestAutomaticSnapshotInvalidationAndBusyPublication(t *testing.T) {
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), videoMatchTimeout)
 				defer cancel()
-				s.matchMessageVideo(ctx, mustResourceID(source.ID), func(int) int { return 0 })
+				s.matchMessageVideo(ctx, mustResourceID(source.ID), func(int) int { return 0 }, nil)
 				close(done)
 			}()
 			<-snapshot
