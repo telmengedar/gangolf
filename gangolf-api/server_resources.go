@@ -7,7 +7,6 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,9 +41,13 @@ func (s *server) v3(ctx context.Context, w http.ResponseWriter, r *http.Request)
 		failure(w, 405, "method_not_allowed")
 		return
 	}
-	token, queryKey := credential(r)
+	token, _ := credential(r)
 	if token == "" {
 		failure(w, 401, "unauthorized")
+		return
+	}
+	if !item && r.Method == http.MethodGet {
+		s.listV3(ctx, w, r)
 		return
 	}
 	if err := lockResources(ctx); err != nil {
@@ -52,29 +55,13 @@ func (s *server) v3(ctx context.Context, w http.ResponseWriter, r *http.Request)
 		return
 	}
 	defer resourceLock.Unlock()
-	cfg, err := s.graph.loadConfig(ctx)
-	if err != nil {
-		storageFailure(w, err)
-		return
-	}
-	p, status := s.authorize(ctx, r, cfg, token, queryKey)
-	if status != 0 {
-		code := "unauthorized"
-		if status == 403 {
-			code = "forbidden"
-		} else if status == 503 {
-			code = "auth_unavailable"
-		}
-		failure(w, status, code)
+	cfg, p, ok := s.authorizeV3(ctx, w, r)
+	if !ok {
 		return
 	}
 	policy := s.policy(p, cfg)
 	if r.Method == http.MethodPost {
 		s.createV3(ctx, w, r, cfg, policy)
-		return
-	}
-	if !item {
-		s.listV3(ctx, w, r, cfg.serviceOwner, policy)
 		return
 	}
 	q, err := url.ParseQuery(r.URL.RawQuery)
@@ -286,71 +273,4 @@ func applyMessagePatch(m messageContent, operations []patchOperation) (messageCo
 		}
 	}
 	return m, (message{Service: m.Service, Channel: m.Channel, User: *m.User, Chunks: m.Chunks, TTS: *m.TTS}).validText(m.SchemaVersion == 2)
-}
-
-func (s *server) listV3(ctx context.Context, w http.ResponseWriter, r *http.Request, owner int64, policy messagePolicy) {
-	q, err := url.ParseQuery(r.URL.RawQuery)
-	if err != nil {
-		failure(w, 400, "invalid_filter")
-		return
-	}
-	ids := make(map[string]string)
-	for _, key := range []string{"userId", "channelId", "replyTo"} {
-		if values, ok := q[key]; ok {
-			if len(values) != 1 {
-				failure(w, 400, "invalid_filter")
-				return
-			}
-			if _, ok := resourceID(values[0]); !ok {
-				failure(w, 400, "invalid_filter")
-				return
-			}
-			ids[key] = values[0]
-			q.Del(key)
-		}
-	}
-	f, err := parseFilter(q)
-	if err != nil {
-		failure(w, 400, "invalid_filter")
-		return
-	}
-	all, err := s.graph.messagesV3(ctx, owner)
-	if err != nil {
-		storageFailure(w, err)
-		return
-	}
-	result := make([]messageResource, 0)
-	for id, m := range all {
-		visible, accessErr := policy.allowed(ctx, m.Service, m.Channel, m.ChannelID, false)
-		if accessErr != nil {
-			storageFailure(w, accessErr)
-			return
-		}
-		if !visible {
-			continue
-		}
-		if m.Deleted || !f.from.IsZero() && m.Time.Before(f.from) || !f.to.IsZero() && !m.Time.Before(f.to) || f.service != "" && m.Service != f.service || f.channel != "" && m.Channel != f.channel || ids["userId"] != "" && m.UserID != ids["userId"] || ids["channelId"] != "" && m.ChannelID != ids["channelId"] || ids["replyTo"] != "" && (m.ReplyTo == nil || *m.ReplyTo != ids["replyTo"]) {
-			continue
-		}
-		result = append(result, m.resource(id))
-	}
-	sort.Slice(result, func(i, j int) bool {
-		a, b := result[i], result[j]
-		if f.descending {
-			a, b = b, a
-		}
-		if !a.Time.Equal(b.Time) {
-			return a.Time.Before(b.Time)
-		}
-		ai, _ := resourceID(a.ID)
-		bi, _ := resourceID(b.ID)
-		return ai < bi
-	})
-	start := min(f.offset, len(result))
-	end := start + min(f.count, len(result)-start)
-	var next *int
-	if end < len(result) {
-		next = &end
-	}
-	respond(w, 200, map[string]any{"result": result[start:end], "total": len(result), "continue": next})
 }
