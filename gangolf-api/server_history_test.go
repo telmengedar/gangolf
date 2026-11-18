@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -251,6 +252,93 @@ func TestV3HistoryReadRevocationFailsClosed(t *testing.T) {
 	status(t, w, 401)
 	if strings.Contains(w.Body.String(), "private") {
 		t.Fatal("revoked token received scanned data")
+	}
+}
+
+func TestV3HistoryExpiryWithoutMutationRequiresFinalAuthorization(t *testing.T) {
+	f, s := newResourceFixture(t)
+	createResource(t, s, v3Message)
+	now := s.now()
+	var advance atomic.Int64
+	s.now = func() time.Time { return now.Add(time.Duration(advance.Load())) }
+	f.legacy.mu.Lock()
+	key := f.legacy.cfg.APIKeys["key"]
+	expiry := now.Add(time.Minute)
+	key.ExpiresAt = &expiry
+	f.legacy.cfg.APIKeys["key"] = key
+	f.legacy.mu.Unlock()
+	status(t, request(t, s, "GET", "/api/v3/messages", "key.secret", ""), 200)
+	barrier := blockHistoryReads(t, s, 1)
+	done := historyRequest(s, context.Background(), "key.secret", "")
+	awaitHistoryBarrier(t, barrier)
+	epoch := s.graph.mutationEpoch.Load()
+	advance.Store(int64(2 * time.Minute))
+	barrier.release <- struct{}{}
+	w := awaitHistoryResponse(t, done)
+	if s.graph.mutationEpoch.Load() != epoch {
+		t.Fatal("expiry changed mutation epoch")
+	}
+	status(t, w, 401)
+	if strings.Contains(w.Body.String(), `"result"`) {
+		t.Fatal("expired credential received scanned history")
+	}
+}
+
+func TestV3HistoryConfigurationNarrowingWithoutMutationRequiresFreshSnapshot(t *testing.T) {
+	f, s, _ := outboundFixture(t)
+	status(t, outboundRequest(s, "key.secret", "config-only", outboundBody), 201)
+	token := addTestKey(f, s, "scoped", "7", "host")
+	f.legacy.mu.Lock()
+	key := f.legacy.cfg.APIKeys["scoped"]
+	key.Scope = "channel-read"
+	key.ChannelIDs = []string{"31"}
+	f.legacy.cfg.APIKeys["scoped"] = key
+	f.legacy.mu.Unlock()
+	before := request(t, s, "GET", "/api/v3/messages", token, "")
+	status(t, before, 200)
+	var initial struct{ Total int }
+	if json.Unmarshal(before.Body.Bytes(), &initial) != nil || initial.Total != 1 {
+		t.Fatal("enabled profile did not expose positive history row")
+	}
+	r := httptest.NewRequest("GET", "/api/v3/messages", nil)
+	cfg, err := s.graph.loadConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller, code := s.authorize(context.Background(), r, cfg, token, false)
+	if code != 0 {
+		t.Fatal("positive principal authorization failed")
+	}
+	barrier := blockHistoryReads(t, s, 1)
+	done := historyRequest(s, context.Background(), token, "")
+	awaitHistoryBarrier(t, barrier)
+	epoch := s.graph.mutationEpoch.Load()
+	f.mu.Lock()
+	changeProfile(f, 30, func(p *twitchProfile) { p.Enabled = new(false) })
+	f.mu.Unlock()
+	current, err := s.graph.loadConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshCaller, code := s.authorize(context.Background(), r, current, token, false)
+	if code != 0 || !reflect.DeepEqual(caller, freshCaller) || reflect.DeepEqual(cfg, current) {
+		t.Fatal("profile change did not preserve principal while narrowing configuration")
+	}
+	barrier.release <- struct{}{}
+	w := awaitHistoryResponse(t, done)
+	status(t, w, 200)
+	if s.graph.mutationEpoch.Load() != epoch {
+		t.Fatal("fixture profile narrowing changed mutation epoch")
+	}
+	var page struct {
+		Result []messageResource
+		Total  int
+	}
+	if json.Unmarshal(w.Body.Bytes(), &page) != nil || page.Total != 0 || len(page.Result) != 0 {
+		t.Fatal("configuration narrowing returned stale history row")
+	}
+	if barrier.attempts.Load() != 2 {
+		t.Fatalf("configuration narrowing attempts=%d want=2", barrier.attempts.Load())
 	}
 }
 
