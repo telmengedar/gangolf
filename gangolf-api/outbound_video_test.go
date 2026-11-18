@@ -195,7 +195,7 @@ func TestMatchMessageVideo_OriginalActorOrSourceRevoked_SuppressesOutbound(t *te
 				case "profile-bot":
 					changeProfile(f, 30, func(p *twitchProfile) { p.BotUserID = "901" })
 				case "profile-client":
-					changeProfile(f, 30, func(p *twitchProfile) { p.ClientID = "other-client" })
+					changeProfile(f, 30, func(p *twitchProfile) { p.ClientID = "otherclient" })
 				case "profile-credential":
 					changeProfile(f, 30, func(p *twitchProfile) { p.CredentialRef = "other-grant" })
 				case "channel-deleted":
@@ -228,11 +228,27 @@ func TestMatchMessageVideo_OriginalActorOrSourceRevoked_SuppressesOutbound(t *te
 					f.nodes[attempt.id] = node
 					f.mu.Unlock()
 				}
+				if scenario == "profile-client" {
+					cfg, err := s.graph.loadConfig(ctx)
+					if err != nil {
+						t.Fatal("changed client identity made the profile invalid")
+					}
+					user := cfg.Users["8"]
+					actor, code := s.boundPrincipal(ctx, cfg, principal{UserID: "8", Permissions: user.Permissions, ManagedOnly: user.ManagedOnly})
+					profile, allowed := selectOutbound(cfg, s.graph.config, actor, message.Channel)
+					_, found, sourceErr := s.videoSource(ctx, cfg, attempt.id)
+					if code != 0 || !allowed || !found || sourceErr != nil || profile.ClientID != "otherclient" || attempt.profile.ClientID != "testclient" {
+						t.Fatal("valid changed client did not retain source and actor eligibility")
+					}
+				}
 				released.Do(func() { close(release) })
 				select {
 				case outcome := <-result:
 					if outcome == "published" {
 						t.Fatal("changed source or original actor still published")
+					}
+					if scenario == "profile-client" && outcome != "source_unauthorized" {
+						t.Fatalf("valid changed client did not reach identity denial: %s", outcome)
 					}
 				case <-ctx.Done():
 					t.Fatal("outbound media preflight did not resume")
