@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 var errUnavailable = errors.New("dependency unavailable")
@@ -20,6 +21,7 @@ var errOutcomeUnknown = errors.New("write outcome unknown")
 const batchType = "gangolf-message-batch"
 
 type graph struct {
+	mutationEpoch       atomic.Uint64
 	base                *url.URL
 	token               string
 	root, group, config int64
@@ -90,6 +92,17 @@ func (g *graph) request(ctx context.Context, method, path string, query url.Valu
 	u := *g.base
 	u.Path = strings.TrimRight(u.Path, "/") + path
 	u.RawQuery = query.Encode()
+	var memo *graphReadMemo
+	if method == http.MethodGet {
+		memo, _ = ctx.Value(graphReadMemoKey).(*graphReadMemo)
+		if memo != nil && memo.graph == g {
+			if data, ok := memo.responses[u.String()]; ok {
+				return bytes.Clone(data), nil
+			}
+		}
+	} else {
+		g.mutationEpoch.Add(1)
+	}
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), bytes.NewReader(body))
 	if err != nil {
 		return nil, errUnavailable
@@ -107,6 +120,9 @@ func (g *graph) request(ctx context.Context, method, path string, query url.Valu
 	data, err := io.ReadAll(io.LimitReader(res.Body, 32<<20+1))
 	if err != nil || len(data) > 32<<20 {
 		return nil, errUnavailable
+	}
+	if memo != nil && memo.graph == g {
+		memo.retain(u.String(), data)
 	}
 	return data, nil
 }
