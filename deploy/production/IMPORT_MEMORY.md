@@ -46,7 +46,7 @@ python3 import_memory.py validate \
 
 ## Execution and recovery
 
-`apply`, `verify` and `rollback` use the same plan/hash and `--journal` path.
+`apply`, `verify`, `finalize` and `rollback` use the same plan/hash and `--journal` path.
 They read a JSON object with `sourceKey` and `targetKey` from stdin. Operations
 must provide that stream privately, without shell tracing or printing it. Tokens
 never appear in command arguments, environment variables or tool output. The
@@ -75,6 +75,11 @@ The write sequence is:
    substance and final name. Null, empty text, empty blob and absent blob remain
    distinct. Source status, type, severity and refinement are preserved.
 3. Create only closed mapped links, retaining stored orientation/type/context.
+   Before linking a zero-position existing anchor, verify that anchor and
+   temporarily zero only the new opposite endpoint's coordinates. At the qualified
+   backend, two zero endpoints cannot move each other. Existing graph degree does
+   not prevent auto-positioning. Check the anchor again after the link; never
+   patch an existing anchor to conceal unexpected coordinate changes.
 4. Restore final coordinates after link side effects and restore the original
    `skipEmbedding` value. This requests one synchronous embedding activation for
    each originally eligible node. The helper verifies the resulting fields and
@@ -96,7 +101,25 @@ stops the run. Existing link pairs are idempotent but their labels are verified.
 
 Use `verify` for a fresh source-preservation, existing-seven, mapping, exact-byte,
 metadata and complete imported-link check. It does not call the inference model
-or assert provider/search readiness.
+or assert provider/search readiness. Incident-edge reads use batches of at most
+100 IDs, paginate every batch and deduplicate by endpoint pair. Duplicate rows
+must agree on stored orientation/type/context; conflicting rows stop verification.
+
+For an already imported corpus whose final verification was interrupted, use
+`finalize` with the original reviewed plan/hash and journal. It runs every source,
+target, control and topology guard before marking the private journal complete.
+Both `verify` and `finalize` enforce GET-only target transport. Neither replays
+node/content/metadata/link writes. Repeated finalization verifies again and leaves
+an already-complete journal unchanged. A failed guard leaves the journal incomplete.
+This still repeats the complete source body/metadata/incident-edge audit and may
+take several minutes. Finalization never repairs anchors or ignores source drift;
+any supported operational data repair requires its own authorization and readback.
+
+```sh
+python3 import_memory.py finalize \
+  --manifest /private/review-plan.json --manifest-sha256 REVIEWED_PLAN_SHA256 \
+  --journal /private/import-journal.json < /private/runtime-credentials.json
+```
 
 Use `rollback` only within the authorized restoration and with its original
 reviewed plan/journal. It deletes only the exact newly created IDs after checking
@@ -117,5 +140,8 @@ The fake HTTP boundary covers exact UTF-8/CRLF and absent/empty content,
 substance clearing, orphan positioning, private mapping, original provenance,
 eligibility staging, repeat apply, cancellation, partial/uncertain create/content/
 link/activation/delete outcomes, drift refusal, rollback ownership and error
-redaction. These are local behavioral checks; they do not establish real import
+redaction. Follow-on checks cover zero-position anchors with existing links,
+external anchor movement refusal, bounded and paginated multi-batch edge reads,
+conflicting duplicate rows, and finalization's no-write/completion guards.
+These are local behavioral checks; they do not establish real import
 completion, live ACL visibility or actual embedding/search readiness.

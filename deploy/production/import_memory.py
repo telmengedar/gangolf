@@ -22,6 +22,7 @@ SOURCE = 'https://divoid.mamgo.io/api'
 TARGET = 'http://gangolf:8091/api'
 FIELDS = 'id,name,type,status,severity,refinement,rootNodeId,ownerId,access,created,lastUpdate,contentType,skipEmbedding,substance,x,y'
 COPY_FIELDS = ('name', 'type', 'status', 'severity', 'refinement', 'substance', 'skipEmbedding', 'x', 'y')
+EDGE_BATCH_SIZE = 100
 
 
 class Refused(Exception):
@@ -142,10 +143,18 @@ def nodes(client, **query):
 
 
 def edges(client, ids):
-    result = rows(client, '/nodes/links', {'ids': ','.join(map(str, ids)), 'sort': 'sourceid'})
-    return sorted([dict(sourceId=e['sourceId'], targetId=e['targetId'],
-                        linkType=e.get('linkType', 'None'), context=e.get('context'))
-                   for e in result], key=lambda e: (e['sourceId'], e['targetId']))
+    require(bool(ids) and all(type(node_id) is int and 0 < node_id < 2 ** 63 for node_id in ids),
+            'valid edge endpoint identities required')
+    found = {}
+    for offset in range(0, len(ids), EDGE_BATCH_SIZE):
+        batch = ids[offset:offset + EDGE_BATCH_SIZE]
+        result = rows(client, '/nodes/links', {'ids': ','.join(map(str, batch)), 'sort': 'sourceid'})
+        for edge in normalized_edges(result):
+            pair = tuple(sorted((edge['sourceId'], edge['targetId'])))
+            require(bool(set(pair) & set(batch)), 'edge outside requested endpoints')
+            require(pair not in found or found[pair] == edge, 'conflicting edge readback')
+            found[pair] = edge
+    return normalized_edges(found.values())
 
 
 def access(value):
@@ -275,16 +284,8 @@ class Migration:
         check_identity(self.source, self.target)
         for original in self.plan['baseline']:
             require(snapshot(self.target, original['metadata']['id']) == original, 'existing target memory changed')
-        additions = self.expected_edges(partial=True)
         for original in self.plan['anchors']:
-            node_id = original['metadata']['id']
-            actual = snapshot(self.target, node_id)
-            require({k: v for k, v in actual['metadata'].items() if k != 'lastUpdate'}
-                    == {k: v for k, v in original['metadata'].items() if k != 'lastUpdate'}
-                    and actual['contentBase64'] == original['contentBase64'], 'mapped anchor changed')
-            allowed = original['links'] + [e for e in additions if node_id in (e['sourceId'], e['targetId'])]
-            require(all(e in actual['links'] for e in original['links'])
-                    and all(e in allowed for e in actual['links']), 'mapped anchor links changed')
+            self.check_anchor(original)
         if source_check:
             for index, node in enumerate(self.plan['nodes'], 1):
                 actual = snapshot(self.source, node['metadata']['id'])
@@ -292,6 +293,17 @@ class Migration:
                         and actual['contentBase64'] == node['contentBase64']
                         and actual['links'] == node['links'], 'source snapshot changed')
                 progress('source-verified', index, len(self.plan['nodes']))
+
+    def check_anchor(self, original):
+        node_id = original['metadata']['id']
+        actual = snapshot(self.target, node_id)
+        require({k: v for k, v in actual['metadata'].items() if k != 'lastUpdate'}
+                == {k: v for k, v in original['metadata'].items() if k != 'lastUpdate'}
+                and actual['contentBase64'] == original['contentBase64'], 'mapped anchor changed')
+        allowed = original['links'] + [e for e in self.expected_edges(partial=True)
+                                       if node_id in (e['sourceId'], e['targetId'])]
+        require(all(e in actual['links'] for e in original['links'])
+                and all(e in allowed for e in actual['links']), 'mapped anchor links changed')
 
     def expected(self, node, marker=False, staged=False):
         result = {key: node['metadata'].get(key) for key in COPY_FIELDS}
@@ -366,9 +378,23 @@ class Migration:
         self.state['edgesStarted'] = True
         self.save()
         for index, edge in enumerate(self.plan['edges'], 1):
+            anchors = [n for n in self.plan['anchors']
+                       if n['metadata']['id'] in (mapping[edge['sourceId']], mapping[edge['targetId']])]
+            for original in anchors:
+                self.check_anchor(original)
+                if original['metadata']['x'] == 0 and original['metadata']['y'] == 0:
+                    source_id = edge['targetId'] if edge['sourceId'] in (901, 902) else edge['sourceId']
+                    node = next(n for n in self.plan['nodes'] if n['metadata']['id'] == source_id)
+                    actual = self.verify_node(node, staged=True)
+                    if actual['metadata']['x'] != 0 or actual['metadata']['y'] != 0:
+                        self.target.request('PATCH', '/nodes/' + str(mapping[source_id]),
+                                            [{'op': 'replace', 'path': '/x', 'value': 0},
+                                             {'op': 'replace', 'path': '/y', 'value': 0}])
             self.target.request('POST', '/nodes/' + str(mapping[edge['sourceId']]) + '/links',
                                 mapping[edge['targetId']],
                                 {'linkType': edge.get('linkType', 'None'), 'context': edge.get('context') or ''})
+            for original in anchors:
+                self.check_anchor(original)
             progress('linked', index, len(self.plan['edges']))
         for index, node in enumerate(self.plan['nodes'], 1):
             entry = self.state['entries'][str(node['metadata']['id'])]
@@ -419,6 +445,13 @@ class Migration:
         expected = sorted(self.expected_edges(), key=lambda e: (e['sourceId'], e['targetId']))
         require(actual == expected, 'imported links mismatch')
 
+    def finalize(self):
+        require(self.path.exists() and not self.state.get('rollback'), 'active import journal required')
+        self.verify()
+        if not self.state['complete']:
+            self.state['complete'] = True
+            self.save()
+
     def rollback(self):
         self.preconditions()
         self.state['rollback'] = True
@@ -460,7 +493,7 @@ class Migration:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('prepare', 'apply', 'verify', 'rollback', 'validate'))
+    parser.add_argument('action', choices=('prepare', 'apply', 'verify', 'finalize', 'rollback', 'validate'))
     parser.add_argument('--manifest', required=True)
     parser.add_argument('--manifest-sha256', required=True)
     parser.add_argument('--journal')
@@ -491,7 +524,7 @@ def main():
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 credentials = json.load(sys.stdin)
                 source = HTTP(SOURCE, credentials['sourceKey'], readonly=True)
-                target = HTTP(TARGET, credentials['targetKey'])
+                target = HTTP(TARGET, credentials['targetKey'], readonly=args.action in ('verify', 'finalize'))
                 migration = Migration(plan, source, target, args.journal)
                 getattr(migration, args.action)()
         print(json.dumps({'ok': True, 'nodes': len(plan['nodes']), 'edges': len(plan['edges'])}))

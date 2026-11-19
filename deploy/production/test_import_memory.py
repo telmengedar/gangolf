@@ -29,6 +29,7 @@ class FakeHTTP:
         self.fail_link = False
         self.fail_activation = False
         self.embeddings = 0
+        self.edge_queries = []
 
     def request(self, method, path, value=None, query=None, raw=False, content_type=None):
         self.calls.append((method, path))
@@ -44,6 +45,7 @@ class FakeHTTP:
             start = query.get('continue', 0)
             return {'result': copy.deepcopy(found[start:start + query.get('count', 500)]), 'total': len(found)}
         if path == '/nodes/links':
+            self.edge_queries.append(copy.deepcopy(query))
             ids = set(map(int, query['ids'].split(',')))
             found = [e for e in self.links if ids & {e['sourceId'], e['targetId']}]
             start = query.get('continue', 0)
@@ -80,9 +82,11 @@ class FakeHTTP:
         if len(parts) == 4 and parts[3] == 'links':
             edge = dict(sourceId=node_id, targetId=value, linkType=query['linkType'], context=query.get('context') or None)
             if not any({e['sourceId'], e['targetId']} == {node_id, value} for e in self.links):
-                if value in self.data and not any(value in (e['sourceId'], e['targetId']) for e in self.links):
-                    self.data[value]['x'] = 42
                 self.links.append(edge)
+                for candidate_id, anchor_id in ((node_id, value), (value, node_id)):
+                    candidate, anchor = self.data[candidate_id], self.data[anchor_id]
+                    if candidate['x'] == 0 and candidate['y'] == 0 and (anchor['x'] != 0 or anchor['y'] != 0):
+                        candidate['x'], candidate['y'] = anchor['x'] + 42, anchor['y'] + 17
             if self.fail_link:
                 raise tool.Refused('uncertain link')
             return None
@@ -240,6 +244,103 @@ class ImportChecks(unittest.TestCase):
         self.migration().apply()
         self.assertEqual(self.target.blobs[500], b'')
         self.assertNotIn(502, self.target.blobs)
+
+    def test_zero_coordinate_anchor_with_existing_links_is_preserved(self):
+        self.source.data[10].update(x=17, y=23)
+        self.plan['nodes'][0]['metadata'].update(x=17, y=23)
+        original_anchor = tool.snapshot(self.target, 8)
+        self.assertTrue(original_anchor['links'])
+        self.migration().apply()
+        self.assertEqual(tool.snapshot(self.target, 8)['metadata'], original_anchor['metadata'])
+        self.assertFalse(any(method == 'PATCH' and path in ('/nodes/1', '/nodes/8')
+                             for method, path in self.target.calls))
+        self.assertEqual((self.target.data[500]['x'], self.target.data[500]['y']), (17, 23))
+
+    def test_external_anchor_move_during_linking_is_refused_without_overwrite(self):
+        request = self.target.request
+        moved = False
+
+        def concurrent_move(method, path, *args, **kwargs):
+            nonlocal moved
+            if method == 'POST' and path.endswith('/links') and not moved:
+                self.target.data[8]['x'] = 77
+                moved = True
+            return request(method, path, *args, **kwargs)
+
+        with patch.object(self.target, 'request', side_effect=concurrent_move):
+            with self.assertRaises(tool.Refused):
+                self.migration().apply()
+        self.assertEqual(self.target.data[8]['x'], 77)
+        self.assertFalse(any(method == 'PATCH' and path in ('/nodes/1', '/nodes/8')
+                             for method, path in self.target.calls))
+
+    def test_edge_batches_bound_urls_deduplicate_and_retain_paginated_incidence(self):
+        self.target.links = [dict(sourceId=1000, targetId=n, linkType='Unidirectional', context='kept')
+                             for n in range(1100, 1700)]
+        self.target.links += [dict(sourceId=9999, targetId=2900, linkType='None', context=None)]
+        actual = tool.edges(self.target, list(range(1000, 3026)))
+        self.assertEqual(actual, tool.normalized_edges(self.target.links))
+        self.assertTrue(any(q['continue'] == 500 for q in self.target.edge_queries))
+        for query in self.target.edge_queries:
+            self.assertLessEqual(len(query['ids'].split(',')), 100)
+            self.assertLess(len(('/api/nodes/links?' + tool.urllib.parse.urlencode(query)).encode()), 4096)
+
+    def test_conflicting_edge_batches_are_refused(self):
+        self.target.links = [dict(sourceId=1000, targetId=1100, linkType='Unidirectional', context='kept')]
+        request = self.target.request
+
+        def conflicting_read(method, path, *args, **kwargs):
+            response = request(method, path, *args, **kwargs)
+            if path == '/nodes/links' and kwargs['query']['ids'].startswith('1100,'):
+                response['result'][0]['context'] = 'concurrently changed'
+            return response
+
+        with patch.object(self.target, 'request', side_effect=conflicting_read):
+            with self.assertRaises(tool.Refused):
+                tool.edges(self.target, list(range(1000, 1200)))
+
+    def pending_finalization(self):
+        with patch.object(tool.Migration, 'verify', side_effect=tool.Refused('terminal check interrupted')):
+            with self.assertRaises(tool.Refused):
+                self.migration().apply()
+        self.assertFalse(tool.load_private(self.path)['complete'])
+
+    def test_finalize_verifies_without_target_writes_and_is_idempotent(self):
+        self.pending_finalization()
+        boundary = len(self.target.calls)
+        self.migration().finalize()
+        self.assertTrue(tool.load_private(self.path)['complete'])
+        self.assertEqual([c for c in self.target.calls[boundary:] if c[0] != 'GET'], [])
+        journal = self.path.read_bytes()
+        self.migration().finalize()
+        self.assertEqual(self.path.read_bytes(), journal)
+        self.assertEqual([c for c in self.target.calls[boundary:] if c[0] != 'GET'], [])
+
+    def test_finalize_failed_guards_do_not_mark_complete_or_write_target(self):
+        self.pending_finalization()
+        source_data, source_blobs = copy.deepcopy((self.source.data, self.source.blobs))
+        target_data, target_blobs, target_links = copy.deepcopy((self.target.data, self.target.blobs, self.target.links))
+        journal = self.path.read_bytes()
+        for field in ('source-body', 'imported-body', 'baseline', 'anchor-created', 'extra-link'):
+            with self.subTest(field=field):
+                self.source.data, self.source.blobs = copy.deepcopy((source_data, source_blobs))
+                self.target.data, self.target.blobs, self.target.links = copy.deepcopy((target_data, target_blobs, target_links))
+                if field == 'source-body':
+                    self.source.blobs[10] += b'changed'
+                elif field == 'imported-body':
+                    self.target.blobs[500] += b'changed'
+                elif field == 'baseline':
+                    self.target.data[100]['name'] = 'changed'
+                elif field == 'anchor-created':
+                    self.target.data[8]['created'] = 'changed'
+                else:
+                    self.target.links.append(dict(sourceId=500, targetId=100, linkType='None', context=None))
+                boundary = len(self.target.calls)
+                with self.assertRaises(tool.Refused):
+                    self.migration().finalize()
+                self.assertEqual(self.path.read_bytes(), journal)
+                self.assertFalse(tool.load_private(self.path)['complete'])
+                self.assertEqual([c for c in self.target.calls[boundary:] if c[0] != 'GET'], [])
 
     def test_changed_source_or_existing_target_blocks_before_create(self):
         self.source.blobs[10] += b'changed'
