@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -233,5 +235,106 @@ func TestEventFenceHTTPResponseDoesNotHoldProducerLocks(t *testing.T) {
 	<-done
 	if err != nil || !published {
 		t.Fatal("held HTTP response retained producer/resource lock")
+	}
+}
+
+func TestQueuedFenceCannotCrossEffectivePrincipalChange(t *testing.T) {
+	for _, kind := range []string{"bound fence", "fresh message"} {
+		t.Run(kind, func(t *testing.T) {
+			f, s, _, _ := inboundFixture(t)
+			ready, release := make(chan struct{}), make(chan struct{})
+			released := false
+			host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				s.ServeHTTP(&eventReadyGate{ResponseWriter: w, ready: ready, release: release}, r)
+			}))
+			ctx, cancel := context.WithCancel(context.Background())
+			var response *http.Response
+			t.Cleanup(func() {
+				if !released {
+					close(release)
+				}
+				cancel()
+				if response != nil {
+					response.Body.Close()
+				}
+				host.Close()
+			})
+			result := make(chan *http.Response, 1)
+			go func() {
+				r, _ := http.NewRequestWithContext(ctx, "GET", host.URL+"/api/v3/events?types=message.created,message.updated&service=Twitch", nil)
+				r.Header.Set("Authorization", "Bearer key.secret")
+				client := &http.Client{Timeout: 2 * time.Second}
+				got, err := client.Do(r)
+				if err != nil {
+					result <- nil
+					return
+				}
+				result <- got
+			}()
+			select {
+			case <-ready:
+			case <-time.After(time.Second):
+				t.Fatal("ready gate not reached")
+			}
+			h := s.eventHub()
+			h.mu.Lock()
+			var sub *eventSubscription
+			for candidate := range h.subs {
+				sub = candidate
+			}
+			h.mu.Unlock()
+			if sub == nil {
+				t.Fatal("positive active stream missing")
+			}
+			original := sub.principal
+			if kind == "bound fence" {
+				status(t, fenceRequest(t, s, "key.secret", sub.id, fenceTestID), 200)
+			} else {
+				s.publishEvent("message.created", "Twitch", "101", new("31"), map[string]string{"control": "still-authorized"})
+			}
+			f.legacy.mu.Lock()
+			key := f.legacy.cfg.APIKeys["key"]
+			key.Permissions = []string{"host"}
+			f.legacy.cfg.APIKeys["key"] = key
+			f.legacy.mu.Unlock()
+			r := httptest.NewRequest("GET", "/api/v3/events", nil)
+			r.Header.Set("Authorization", "Bearer key.secret")
+			current, _, code, _ := s.eventAuthorization(context.Background(), r)
+			if code != 0 || current.UserID != original.UserID || reflect.DeepEqual(current, original) {
+				t.Fatal("fixture did not narrow an otherwise-authorized principal")
+			}
+			close(release)
+			released = true
+			select {
+			case response = <-result:
+			case <-time.After(time.Second):
+				t.Fatal("response missing")
+			}
+			if response == nil || response.StatusCode != 200 {
+				t.Fatal("positive stream missing")
+			}
+			scanner := bufio.NewScanner(response.Body)
+			message := false
+			for scanner.Scan() {
+				if strings.HasPrefix(scanner.Text(), "event: stream.fence") {
+					t.Fatal("queued fence written after effective principal changed from original stream grant")
+				}
+				if strings.HasPrefix(scanner.Text(), "event: message.created") {
+					message = true
+					cancel()
+					break
+				}
+			}
+			if kind == "bound fence" {
+				if err := scanner.Err(); err != nil {
+					t.Fatal("changed-principal stream did not end cleanly")
+				}
+				if message {
+					t.Fatal("fence fixture received unrelated data")
+				}
+			} else if !message {
+				t.Fatal("normal message lost freshly-authorized delivery after principal changed")
+			}
+		})
 	}
 }

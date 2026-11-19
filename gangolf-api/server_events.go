@@ -7,6 +7,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -224,7 +225,7 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			source = &frame.envelope
 		}
 		p, allowed, status, code := s.freshEventAuthorization(ctx, r, filter.types["video.triggered"], filter, source)
-		if status != 0 || p.UserID != sub.user || !h.active(sub) {
+		if status != 0 || p.UserID != sub.user || !h.active(sub) || frame.fence != "" && !reflect.DeepEqual(p, sub.principal) {
 			reason = "authorization_failed"
 			if status != 0 {
 				reason = code
