@@ -10,11 +10,10 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"sync"
 	"unicode/utf8"
 )
 
-var resourceLock sync.Mutex
+var resourceLock resourceMutex
 
 func (s *server) v3(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	item := r.URL.Path != "/api/v3/messages"

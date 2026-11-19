@@ -12,7 +12,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"unicode"
 )
@@ -22,7 +21,7 @@ type mediaStore struct {
 	catalogID  int64
 	tenant     string
 	authID     string
-	mu         sync.Mutex
+	mu         resourceMutex
 	generation uint64
 }
 
