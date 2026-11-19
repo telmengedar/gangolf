@@ -151,7 +151,7 @@ func newRoutedRig(t *testing.T, routes map[window.Key][]window.Key) *rig {
 
 func newConfiguredRig(t *testing.T, cfg core.Config) *rig {
 	t.Helper()
-	cfg.BotName, cfg.Interval = "GangolfBot", time.Millisecond
+	cfg.BotName = "GangolfBot"
 	r := &rig{clock: start, runner: &fakeRunner{result: processor.Result{Reply: "an answer"}}, logs: &bytes.Buffer{}}
 	r.messages = &fakeMessages{clock: &r.clock, echoPosts: true}
 	log := slog.New(slog.NewTextHandler(r.logs, nil))
@@ -286,7 +286,7 @@ func TestRunRetriesTheBootstrapUntilItSucceedsBeforeAnsweringAnything(t *testing
 
 	done := make(chan struct{})
 	go func() {
-		r.core.Run(ctx)
+		r.core.RunFixture(ctx)
 		close(done)
 	}()
 	select {
@@ -580,7 +580,7 @@ func postedAs(t *testing.T, botName, reply string) []posted {
 	t.Helper()
 	r := newRig(t)
 	log := slog.New(slog.NewTextHandler(r.logs, nil))
-	r.core = core.New(core.Config{Routes: selfRoutes(channel), BotName: botName, Interval: time.Millisecond}, r.messages, r.runner, log, func() time.Time { return r.clock })
+	r.core = core.New(core.Config{Routes: selfRoutes(channel), BotName: botName}, r.messages, r.runner, log, func() time.Time { return r.clock })
 	r.runner.result = processor.Result{Reply: reply}
 	r.bootstrap(t)
 	r.advance(time.Second)
@@ -774,7 +774,7 @@ func TestKeyNeverReachesTheLogs(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(logs, nil))
 	client := messages.New(server.URL, key, "GangolfBot", server.Client(), log)
 	runner := &fakeRunner{}
-	c := core.New(core.Config{Routes: selfRoutes(channel), BotName: "GangolfBot", Interval: time.Millisecond}, client, runner, log, func() time.Time { return start })
+	c := core.New(core.Config{Routes: selfRoutes(channel), BotName: "GangolfBot"}, client, runner, log, func() time.Time { return start })
 
 	c.Tick(context.Background())
 	_ = c.Bootstrap(context.Background())

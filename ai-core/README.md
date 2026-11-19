@@ -1,6 +1,12 @@
 # ai-core
 
-Gangolf's chat brain: a small Go service that polls the online message API, keeps a short per-channel window of the conversation, asks the processor to answer new lines and posts the answer back. Gangolf may also decide he has nothing to add, in which case nothing is posted.
+Gangolf's chat brain: a small Go service that consumes producer-pushed message events, keeps a short per-channel window of the conversation, asks the processor to answer new lines and posts the answer back. Gangolf may also decide he has nothing to add, in which case nothing is posted.
+
+The core keeps one authenticated SSE subscription for `message.created,message.updated` with `service=Twitch`. Healthy operation has no periodic message discovery or per-turn history query. One settle timer batches pending messages for two seconds. A targeted ordered stream fence after each turn keeps messages committed during the turn as context; only messages after that fence can start the next turn.
+
+Startup and reconnect subscribe first, then perform one finite recent-history reconciliation and consume its fence before enabling replies. History and buffered events through that boundary are context-only, so reconnect never replays an interrupted public reply. The live feed has no replay guarantee. EOF, reset, malformed frames or overflow cancel the current generation and its active model/post operation. Authorization denial stops synchronization; transport failures reconnect with capped backoff. A public post already accepted before cancellation cannot be retracted or automatically retried.
+
+Each generation retains at most 32,000 observation identities and a reader backlog of 64 frames/8 MiB. History reconciliation has a 30-second budget, at most 64 pages of 500 rows, and an 8 MiB response limit. Overflow abandons synchronization rather than evicting IDs and permitting replay. Readable-ID edits do not become new work. A retained unreadable observation may become readable once within its original seven-minute age and observation lifetime; unknown or expired updates cannot start a reply. Other inherited window/roster state is not a whole-process memory cap.
 
 ## Configuration
 
@@ -19,7 +25,7 @@ All configuration is environment variables.
 | `PROCESSOR_MEMORY_CONFIG` | yes | positive config node ID for the dedicated private memory policy with Processor `note.mode=decision`; no default; missing or blank fails startup |
 | `PROCESSOR_CONFIG` | no | id of the `processor-config` node sent with every run, default `17607` (Gangolf's config) |
 
-Private memory review runs after a successful public post, using frozen speaker statements with generated assistant replies excluded from its evidence. Its response never reaches chat. One worker has one waiting slot; new jobs are dropped when busy, and each review has a 60-second timeout with no retry. Shutdown cancels active review and discards waiting work. A timeout leaves remote persistence unknown. Every valid deployment starts the memory worker. Review shares model capacity with chat; deployment requires a compatible Processor and measured memory quality and latency.
+Private memory review runs after a confirmed public post or an accepted IRC submission (whose visibility remains unconfirmed), using frozen speaker statements with generated assistant replies excluded from its evidence. Its response never reaches chat. One worker has one waiting slot; new jobs are dropped when busy, and each review has a 60-second timeout with no retry. Shutdown cancels active review and discards waiting work. A timeout leaves remote persistence unknown. Every valid deployment starts the memory worker. Review shares model capacity with chat; deployment requires a compatible Processor and measured memory quality and latency.
 
 ## Routing
 

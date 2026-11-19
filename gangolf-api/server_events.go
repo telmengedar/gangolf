@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -37,7 +39,7 @@ func parseEventFilter(raw string) (eventFilter, bool) {
 			continue
 		case "types":
 			for _, kind := range strings.Split(values[0], ",") {
-				if kind != "message.created" && kind != "video.triggered" || f.types[kind] {
+				if kind != "message.created" && kind != "message.updated" && kind != "video.triggered" || f.types[kind] {
 					return f, false
 				}
 				f.types[kind] = true
@@ -183,6 +185,8 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		failure(w, 429, "stream_limit")
 		return
 	}
+	token, _ := credential(r)
+	h.identify(sub, p, token)
 	control := http.NewResponseController(w)
 	if !eventWriterSupported(w) || control.SetWriteDeadline(time.Time{}) != nil {
 		failure(w, 503, "stream_unavailable")
@@ -191,7 +195,8 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
-	if !writeEventFrame(w, control, []byte("event: stream.ready\ndata: {\"schemaVersion\":1,\"replay\":false,\"resyncRequired\":true}\n\n")) {
+	ready, _ := json.Marshal(map[string]any{"schemaVersion": 1, "replay": false, "resyncRequired": true, "streamId": sub.id})
+	if !writeEventFrame(w, control, append(append([]byte("event: stream.ready\ndata: "), ready...), '\n', '\n')) {
 		return
 	}
 	slog.Debug("event stream ready", "replay", false)
@@ -216,11 +221,11 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		case <-ticker.C:
 		}
 		var source *eventEnvelope
-		if data {
+		if data && frame.fence == "" {
 			source = &frame.envelope
 		}
 		p, allowed, status, code := s.freshEventAuthorization(ctx, r, filter.types["video.triggered"], filter, source)
-		if status != 0 || p.UserID != sub.user || !h.active(sub) {
+		if status != 0 || p.UserID != sub.user || !h.active(sub) || frame.fence != "" && !reflect.DeepEqual(p, sub.principal) {
 			reason = "authorization_failed"
 			if status != 0 {
 				reason = code
@@ -228,7 +233,7 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if data {
-			if !allowed {
+			if !allowed && frame.fence == "" {
 				slog.Debug("event frame suppressed", "reason", "source_unauthorized")
 				continue
 			}
@@ -272,6 +277,10 @@ func (s *server) primaryEventAuthorization(ctx context.Context, r *http.Request,
 		return principal{}, false, 503, "storage_unavailable"
 	}
 	defer resourceLock.Unlock()
+	return s.lockedEventAuthorization(ctx, r, filter, source)
+}
+
+func (s *server) lockedEventAuthorization(ctx context.Context, r *http.Request, filter eventFilter, source *eventEnvelope) (principal, bool, int, string) {
 	p, cfg, status, code := s.eventAuthorization(ctx, r)
 	if status != 0 {
 		return p, false, status, code

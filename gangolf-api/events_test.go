@@ -12,11 +12,25 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
+type eventTestBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	once   sync.Once
+	err    error
+}
+
+func (b *eventTestBody) Close() error {
+	b.once.Do(func() { b.cancel(); b.err = b.ReadCloser.Close() })
+	return b.err
+}
+
 type eventTestStream struct {
+	id     string
 	frames chan string
 	body   io.ReadCloser
 }
@@ -38,7 +52,7 @@ func openEventTestStream(t *testing.T, host *httptest.Server, token, query strin
 		response.Body.Close()
 		t.Fatalf("handshake status=%d", response.StatusCode)
 	}
-	s := &eventTestStream{frames: make(chan string, 256), body: response.Body}
+	s := &eventTestStream{frames: make(chan string, 256), body: &eventTestBody{ReadCloser: response.Body, cancel: cancel}}
 	t.Cleanup(func() { cancel(); s.body.Close() })
 	go func() {
 		defer close(s.frames)
@@ -54,9 +68,17 @@ func openEventTestStream(t *testing.T, host *httptest.Server, token, query strin
 			}
 		}
 	}()
-	if ready := nextEventTestFrame(t, s, 3*time.Second); ready != "event: stream.ready\ndata: {\"schemaVersion\":1,\"replay\":false,\"resyncRequired\":true}\n" {
-		t.Fatalf("first frame=%q", ready)
+	ready := nextEventTestFrame(t, s, 3*time.Second)
+	var value struct {
+		StreamID       string `json:"streamId"`
+		SchemaVersion  int
+		Replay         bool
+		ResyncRequired bool
 	}
+	if !strings.HasPrefix(ready, "event: stream.ready\ndata: ") || json.Unmarshal([]byte(strings.TrimPrefix(ready, "event: stream.ready\ndata: ")), &value) != nil || !eventCorrelation(value.StreamID) || value.SchemaVersion != 1 || value.Replay || !value.ResyncRequired {
+		t.Fatal("invalid stream ready")
+	}
+	s.id = value.StreamID
 	return s
 }
 

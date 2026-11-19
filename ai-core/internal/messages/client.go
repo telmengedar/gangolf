@@ -11,7 +11,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -116,54 +115,17 @@ func decimal(value string) bool {
 
 // List returns a complete bounded scan of inbound Twitch observations.
 func (c *Client) List(ctx context.Context, from time.Time) ([]window.Line, error) {
-	q := url.Values{"from": {from.UTC().Format(time.RFC3339Nano)}, "to": {time.Now().UTC().Format(time.RFC3339Nano)}, "sort": {"time"}, "descending": {"false"}, "count": {"500"}}
-	lines := []window.Line{}
-	offset := 0
-	for {
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/v3/messages?"+q.Encode(), nil)
-		if err != nil {
-			return nil, errors.New("list messages: invalid request")
+	lines := make([]window.Line, 0)
+	err := c.Sync(ctx, from, func(frame Frame) error {
+		if frame.Line != nil {
+			lines = append(lines, *frame.Line)
 		}
-		body, err := c.do(request)
-		if err != nil {
-			return nil, fmt.Errorf("list messages: %w", err)
-		}
-		var result page
-		if json.Unmarshal(body, &result) != nil || result.Result == nil || result.Total == nil || *result.Total < 0 || len(result.Continue) == 0 {
-			return nil, errors.New("list messages: invalid page")
-		}
-		rows := *result.Result
-		if len(rows) > 500 || offset+len(rows) > *result.Total {
-			return nil, errors.New("list messages: inconsistent page")
-		}
-		for _, message := range rows {
-			if !resourceID(message.ID) {
-				return nil, errors.New("list messages: invalid resource ID")
-			}
-			if message.Service != "Twitch" || message.User.Service != "Twitch" || !decimal(message.User.ServiceID) || !decimal(message.Channel) || message.Source == nil || message.Source.Kind != "twitch" || message.Source.Transport != nil && *message.Source.Transport != "irc" || message.Delivery != nil {
-				continue
-			}
-			stamp, ok := parseTime(message.Time)
-			text := textOf(message.Chunks)
-			if !ok || text == "" {
-				c.log.Warn("skipped an unreadable message", "timeReadable", ok, "hasText", text != "")
-				continue
-			}
-			lines = append(lines, window.Line{ID: message.ID, Own: message.User.ServiceID == c.bot, Key: window.Key{Service: message.Service, Channel: message.Channel}, Speaker: message.User.Name, Text: text, Time: stamp})
-		}
-		if string(result.Continue) == "null" {
-			if offset+len(rows) != *result.Total {
-				return nil, errors.New("list messages: incomplete page")
-			}
-			return lines, nil
-		}
-		var next int
-		if json.Unmarshal(result.Continue, &next) != nil || next <= offset || next != offset+len(rows) || next >= *result.Total {
-			return nil, errors.New("list messages: invalid continuation")
-		}
-		offset = next
-		q.Set("continue", strconv.Itoa(next))
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
+	return lines, nil
 }
 
 // Post makes one delivery attempt and succeeds only on a matching confirmed sent resource.
@@ -215,14 +177,14 @@ func (c *Client) do(request *http.Request) ([]byte, error) {
 		return nil, errors.New("message API transport failure")
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
+	body, err := io.ReadAll(io.LimitReader(response.Body, (8<<20)+1))
+	if err != nil || len(body) > 8<<20 {
 		return nil, errors.New("message API response read failed")
 	}
 	if response.StatusCode != http.StatusOK && (request.Method != http.MethodPost || response.StatusCode != http.StatusCreated) {
 		hint := ""
 		if response.StatusCode == 401 || response.StatusCode == 403 {
-			hint = " (check GANGOLF_API_KEY)"
+			return nil, &AuthorizationError{Status: response.StatusCode}
 		}
 		var detail struct {
 			ID   string `json:"id"`

@@ -7,6 +7,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -117,9 +118,21 @@ func (s *server) v3(ctx context.Context, w http.ResponseWriter, r *http.Request)
 			return
 		}
 		if err := s.graph.replaceContent(ctx, id, updated); err != nil {
+			s.eventHub().reset()
 			storageFailure(w, errOutcomeUnknown)
 			return
 		}
+		confirmed, err := s.graph.readEntity(ctx, id, "message", cfg.serviceOwner)
+		stored, decodeErr := decodeMessage(confirmed)
+		if err != nil || decodeErr != nil || !reflect.DeepEqual(stored, updated) {
+			s.eventHub().reset()
+			storageFailure(w, errOutcomeUnknown)
+			return
+		}
+		s.publishEvent("message.updated", stored.Service, stored.Channel, &stored.ChannelID, struct {
+			ResourceVersion int             `json:"resourceVersion"`
+			Message         messageResource `json:"message"`
+		}{3, stored.resource(id)})
 		respond(w, 200, updated.resource(id))
 	case http.MethodDelete:
 		if !m.Deleted {

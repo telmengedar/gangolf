@@ -16,10 +16,6 @@ import (
 )
 
 const (
-	// PollInterval is the pause between two polls of the message API.
-	PollInterval = 2 * time.Second
-	// Overlap is how far each poll reaches back before the newest line seen.
-	Overlap = 10 * time.Second
 	// Settle is how long a channel must stay quiet before its pending lines are answered.
 	Settle = 2 * time.Second
 
@@ -35,7 +31,6 @@ const (
 
 // Messages is the online message API as the core uses it.
 type Messages interface {
-	List(ctx context.Context, from time.Time) ([]window.Line, error)
 	Post(ctx context.Context, key window.Key, text string) error
 }
 
@@ -49,23 +44,20 @@ type Config struct {
 	Routes         map[window.Key][]window.Key
 	MinWords       map[window.Key]int
 	BotName        string
-	Interval       time.Duration
 	MemoryReviewer MemoryReviewer
 }
 
-// Core polls, windows, runs and posts.
+// Core receives messages, maintains windows and runs one turn at a time.
 type Core struct {
+	observations   map[string]messageObservation
 	routes         map[window.Key][]window.Key
 	minWords       map[window.Key]int
-	interval       time.Duration
 	windows        *window.Windows
 	messages       Messages
 	runner         Runner
 	log            *slog.Logger
 	now            func() time.Time
 	labels         []string
-	cursor         time.Time
-	fallback       time.Time
 	unlisted       map[window.Key]bool
 	closing        map[window.Key]bool
 	violations     map[window.Key][]time.Time
@@ -75,9 +67,6 @@ type Core struct {
 
 // New returns a core wired to its two collaborators; now supplies the clock.
 func New(cfg Config, messages Messages, runner Runner, log *slog.Logger, now func() time.Time) *Core {
-	if cfg.Interval == 0 {
-		cfg.Interval = PollInterval
-	}
 	return &Core{
 		unlisted:       make(map[window.Key]bool),
 		closing:        make(map[window.Key]bool),
@@ -85,7 +74,6 @@ func New(cfg Config, messages Messages, runner Runner, log *slog.Logger, now fun
 		memoryReviewer: cfg.MemoryReviewer,
 		routes:         cfg.Routes,
 		minWords:       cfg.MinWords,
-		interval:       cfg.Interval,
 		labels:         []string{cfg.BotName, personaName},
 		windows:        window.New(cfg.BotName),
 		messages:       messages,
@@ -95,8 +83,10 @@ func New(cfg Config, messages Messages, runner Runner, log *slog.Logger, now fun
 	}
 }
 
-// Run bootstraps, retrying until it succeeds, and then ticks until the context ends.
-func (c *Core) Run(ctx context.Context) {
+// Run synchronizes once per connection and handles ordered producer events.
+func (c *Core) Run(ctx context.Context) { c.withMemoryWorker(ctx, func() { c.runEvents(ctx) }) }
+
+func (c *Core) withMemoryWorker(ctx context.Context, run func()) {
 	if c.memoryReviewer != nil {
 		workerCtx, cancel := context.WithCancel(ctx)
 		c.memoryJobs = make(chan memoryJob, 1)
@@ -111,95 +101,7 @@ func (c *Core) Run(ctx context.Context) {
 			c.memoryJobs = nil
 		}()
 	}
-	for {
-		err := c.Bootstrap(ctx)
-		if err == nil {
-			break
-		}
-		c.log.Error("bootstrap poll failed", "error", err.Error())
-		if !sleep(ctx, c.interval) {
-			return
-		}
-	}
-	for sleep(ctx, c.interval) {
-		c.Tick(ctx)
-	}
-}
-
-// Bootstrap loads the recent conversation as context and marks all of it answered.
-func (c *Core) Bootstrap(ctx context.Context) error {
-	c.fallback = c.now().Add(-window.MaxAge)
-	if err := c.poll(ctx); err != nil {
-		return err
-	}
-	c.windows.MarkAllAnswered()
-	return nil
-}
-
-// Tick polls once and answers at most one settled channel.
-func (c *Core) Tick(ctx context.Context) {
-	c.refresh(ctx)
-	now := c.now()
-	c.windows.Evict(now)
-	if key, ok := c.windows.Next(now, Settle); ok {
-		if c.turn(ctx, key) {
-			c.closing[key] = true
-			c.refresh(ctx)
-		}
-	}
-}
-
-func (c *Core) refresh(ctx context.Context) {
-	if err := c.poll(ctx); err != nil {
-		c.log.Error("poll failed", "error", err.Error())
-	}
-}
-
-func (c *Core) from() time.Time {
-	if c.cursor.IsZero() {
-		return c.fallback
-	}
-	return c.cursor.Add(-Overlap)
-}
-
-func (c *Core) poll(ctx context.Context) error {
-	lines, err := c.messages.List(ctx, c.from())
-	if err != nil {
-		return err
-	}
-	var routed []window.Line
-	for _, line := range lines {
-		if line.Time.After(c.cursor) {
-			c.cursor = line.Time
-		}
-		if targets, ok := c.routes[line.Key]; ok {
-			minimum := c.minWords[line.Key]
-			short := minimum > 0 && words(line.Text) < minimum
-			for _, target := range targets {
-				copied := line
-				copied.Key = target
-				copied.CannotStartRun = short
-				routed = append(routed, copied)
-			}
-			continue
-		}
-		if !c.unlisted[line.Key] {
-			c.unlisted[line.Key] = true
-			c.log.Warn("ignoring a channel that is not in GANGOLF_CHANNELS", "service", line.Service, "channel", line.Channel)
-		}
-	}
-	added := c.windows.Ingest(routed, c.now())
-	c.windows.Forget(c.cursor.Add(-2 * Overlap))
-	if added > 0 {
-		c.log.Info("ingested", "lines", added)
-	}
-	for key := range c.closing {
-		if kept := c.windows.MarkAnswered(key); kept > 0 {
-			c.log.Info("kept lines written during the run as context", "service", key.Service, "channel", key.Channel, "lines", kept)
-		}
-		delete(c.closing, key)
-	}
-	return nil
+	run()
 }
 
 func (c *Core) turn(ctx context.Context, key window.Key) bool {
@@ -216,7 +118,13 @@ func (c *Core) turn(ctx context.Context, key window.Key) bool {
 	c.pruneViolations(key, now)
 	input := c.withMuteNotice(key, batch.Input)
 	started := now
+	if ctx.Err() != nil {
+		return true
+	}
 	result, err := c.runner.Run(ctx, input, batch.History)
+	if ctx.Err() != nil {
+		return true
+	}
 	took := c.now().Sub(started)
 	if err != nil {
 		c.log.Error("run failed", "channel", key.Channel, "pending", batch.Pending, "dropped", batch.Dropped, "error", err.Error())
@@ -229,6 +137,9 @@ func (c *Core) turn(ctx context.Context, key window.Key) bool {
 		retryInput := appendNotice(input, notice)
 		c.log.Info("repeat detected; requesting a fresh answer", "service", key.Service, "channel", key.Channel, "outcome", "repeat-reask", "violations", len(c.violations[key]))
 		retryStarted := c.now()
+		if ctx.Err() != nil {
+			return true
+		}
 		retry, retryErr := c.runner.Run(ctx, retryInput, batch.History)
 		took += c.now().Sub(retryStarted)
 		if retryErr != nil {
@@ -249,6 +160,9 @@ func (c *Core) turn(ctx context.Context, key window.Key) bool {
 	}
 	if silent {
 		c.logTurn(key, batch, took, len(text), silent, outcome(result, silent))
+		return true
+	}
+	if ctx.Err() != nil {
 		return true
 	}
 	if err := c.messages.Post(ctx, key, text); err != nil {
