@@ -3,6 +3,7 @@ package window
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -101,6 +102,11 @@ func (w *Windows) Ingest(lines []Line, now time.Time) int {
 	}
 	for _, entries := range w.lines {
 		sort.SliceStable(entries, func(i, j int) bool {
+			if entries[i].Time.Equal(entries[j].Time) && entries[i].ID != "" && entries[j].ID != "" {
+				a, _ := strconv.ParseInt(entries[i].ID, 10, 64)
+				b, _ := strconv.ParseInt(entries[j].ID, 10, 64)
+				return a < b
+			}
 			return entries[i].Time.Before(entries[j].Time)
 		})
 	}
@@ -284,4 +290,24 @@ func keyLess(a, b Key) bool {
 		return a.Service < b.Service
 	}
 	return a.Channel < b.Channel
+}
+
+// PendingAt returns the next actual pending settle deadline.
+func (w *Windows) PendingAt(settle time.Duration) (time.Time, bool) {
+	var next time.Time
+	for _, entries := range w.lines {
+		var newest time.Time
+		for _, entry := range entries {
+			if entry.pending && entry.arrived.After(newest) {
+				newest = entry.arrived
+			}
+		}
+		if !newest.IsZero() {
+			deadline := newest.Add(settle)
+			if next.IsZero() || deadline.Before(next) {
+				next = deadline
+			}
+		}
+	}
+	return next, !next.IsZero()
 }

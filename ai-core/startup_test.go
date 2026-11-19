@@ -3,13 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -143,17 +143,42 @@ func TestEveryConfiguredValueReachesTheWire(t *testing.T) {
 		apiKey     = "wirekey.distinctive-secret"
 		botName    = "Wiretap"
 	)
-	var (
-		api       recorder
-		runs      recorder
-		lists     int
-		stamp     string
-		longStamp string
-		posted    = make(chan struct{}, 1)
-		listMutex sync.Mutex
-	)
+	var api, runs recorder
+	posted := make(chan struct{}, 1)
+	events := make(chan string, 16)
+	var fences atomic.Int64
+	makeMessage := func(id, text string) string {
+		body, _ := json.Marshal(map[string]any{"schemaVersion": 1, "id": "epoch:" + id, "type": "message.created", "data": map[string]any{"resourceVersion": 3, "message": map[string]any{"id": id, "source": map[string]string{"kind": "twitch"}, "service": "Twitch", "channel": "456", "user": map[string]string{"service": "Twitch", "serviceId": "11", "name": "viewer"}, "time": time.Now().UTC().Format(time.RFC3339Nano), "chunks": []map[string]any{{"type": 0, "data": text}}}}})
+		return "event: message.created\ndata: " + string(body) + "\n\n"
+	}
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		entry := api.record(r)
+		if strings.HasSuffix(r.URL.Path, "/v3/events") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, "event: stream.ready\ndata: {\"schemaVersion\":1,\"replay\":false,\"resyncRequired\":true,\"streamId\":\"0123456789abcdef0123456789abcdef\"}\n\n")
+			w.(http.Flusher).Flush()
+			for {
+				select {
+				case frame := <-events:
+					io.WriteString(w, frame)
+					w.(http.Flusher).Flush()
+				case <-r.Context().Done():
+					return
+				}
+			}
+		}
+		if strings.HasSuffix(r.URL.Path, "/events/fence") {
+			var fence map[string]string
+			json.Unmarshal(entry.body, &fence)
+			frame, _ := json.Marshal(map[string]any{"schemaVersion": 1, "requestId": fence["requestId"]})
+			events <- "event: stream.fence\ndata: " + string(frame) + "\n\n"
+			json.NewEncoder(w).Encode(fence)
+			if fences.Add(1) == 1 {
+				events <- makeMessage("1", "anyone there")
+				time.AfterFunc(3*time.Second, func() { events <- makeMessage("2", "is anyone out there at all") })
+			}
+			return
+		}
 		if entry.method == http.MethodPost {
 			writeSent(w, r, entry.body)
 			select {
@@ -162,26 +187,7 @@ func TestEveryConfiguredValueReachesTheWire(t *testing.T) {
 			}
 			return
 		}
-		listMutex.Lock()
-		lists++
-		call := lists
-		if stamp == "" && call > 1 {
-			stamp = time.Now().UTC().Format(time.RFC3339Nano)
-		}
-		if longStamp == "" && call >= 5 {
-			longStamp = time.Now().UTC().Format(time.RFC3339Nano)
-		}
-		short, long := stamp, longStamp
-		listMutex.Unlock()
-		if call == 1 {
-			io.WriteString(w, `{"result":[],"total":0,"continue":null}`)
-			return
-		}
-		rows := `{"id":"1","source":{"kind":"twitch"},"service":"Twitch","channel":"456","user":{"service":"Twitch","serviceId":"11","name":"viewer"},"time":"` + short + `","chunks":[{"type":0,"data":"anyone there"}]}`
-		if long != "" {
-			rows += `,{"id":"2","source":{"kind":"twitch"},"service":"Twitch","channel":"456","user":{"service":"Twitch","serviceId":"11","name":"viewer"},"time":"` + long + `","chunks":[{"type":0,"data":"is anyone out there at all"}]}`
-		}
-		io.WriteString(w, `{"result":[`+rows+`],"total":`+fmt.Sprint(1+boolInt(long != ""))+`,"continue":null}`)
+		io.WriteString(w, `{"result":[],"total":0,"continue":null}`)
 	}))
 	defer apiServer.Close()
 	processorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -269,13 +275,13 @@ func TestEveryConfiguredValueReachesTheWire(t *testing.T) {
 	}
 	var posts []recordedRequest
 	for _, request := range api.all() {
-		if !strings.HasPrefix(request.path, apiSegment+"/v3/messages") {
+		if !strings.HasPrefix(request.path, apiSegment+"/v3/") {
 			t.Fatalf("message request path = %s, want prefix %s/v3/messages", request.path, apiSegment)
 		}
 		if request.auth != "Bearer "+apiKey {
 			t.Fatalf("message request Authorization = %q, want the configured key", request.auth)
 		}
-		if request.method == http.MethodPost {
+		if request.method == http.MethodPost && request.path == apiSegment+"/v3/messages" {
 			posts = append(posts, request)
 		}
 	}

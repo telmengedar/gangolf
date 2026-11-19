@@ -17,10 +17,41 @@ func TestPrivateMemoryWiringUsesDistinctConfigAfterPublicPostAndNeverPublishesIt
 	var mu sync.Mutex
 	var order []string
 	var posts []string
-	var stamp string
+	events := make(chan string, 16)
+	var fences int
 	var lists int
 	private := make(chan []byte, 1)
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/v3/events") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, "event: stream.ready\ndata: {\"schemaVersion\":1,\"replay\":false,\"resyncRequired\":true,\"streamId\":\"0123456789abcdef0123456789abcdef\"}\n\n")
+			w.(http.Flusher).Flush()
+			for {
+				select {
+				case frame := <-events:
+					io.WriteString(w, frame)
+					w.(http.Flusher).Flush()
+				case <-r.Context().Done():
+					return
+				}
+			}
+		}
+		if strings.HasSuffix(r.URL.Path, "/events/fence") {
+			var fence map[string]string
+			json.NewDecoder(r.Body).Decode(&fence)
+			body, _ := json.Marshal(map[string]any{"schemaVersion": 1, "requestId": fence["requestId"]})
+			events <- "event: stream.fence\ndata: " + string(body) + "\n\n"
+			mu.Lock()
+			fences++
+			first := fences == 1
+			mu.Unlock()
+			json.NewEncoder(w).Encode(fence)
+			if first {
+				body, _ := json.Marshal(map[string]any{"schemaVersion": 1, "id": "epoch:1", "type": "message.created", "data": map[string]any{"resourceVersion": 3, "message": map[string]any{"id": "1", "source": map[string]string{"kind": "twitch"}, "service": "Twitch", "channel": "123", "user": map[string]string{"service": "Twitch", "serviceId": "11", "name": "Mara"}, "time": time.Now().UTC().Format(time.RFC3339Nano), "chunks": []map[string]any{{"type": 0, "data": "hello from the stream"}}}}})
+				events <- "event: message.created\ndata: " + string(body) + "\n\n"
+			}
+			return
+		}
 		if r.Method == http.MethodPost {
 			body, _ := io.ReadAll(r.Body)
 			mu.Lock()
@@ -32,17 +63,8 @@ func TestPrivateMemoryWiringUsesDistinctConfigAfterPublicPostAndNeverPublishesIt
 		}
 		mu.Lock()
 		lists++
-		if lists == 1 {
-			mu.Unlock()
-			io.WriteString(w, `{"result":[],"total":0,"continue":null}`)
-			return
-		}
-		if stamp == "" {
-			stamp = time.Now().UTC().Format(time.RFC3339Nano)
-		}
-		at := stamp
 		mu.Unlock()
-		io.WriteString(w, `{"result":[{"id":"1","source":{"kind":"twitch"},"service":"Twitch","channel":"123","user":{"service":"Twitch","serviceId":"11","name":"Mara"},"time":"`+at+`","chunks":[{"type":0,"data":"hello from the stream"}]}],"total":1,"continue":null}`)
+		io.WriteString(w, `{"result":[],"total":0,"continue":null}`)
 	}))
 	defer api.Close()
 	processorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -119,7 +141,7 @@ func TestPrivateMemoryWiringUsesDistinctConfigAfterPublicPostAndNeverPublishesIt
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if strings.Join(order, ",") != "public,private" || len(posts) != 1 || !strings.Contains(posts[0], "accepted public reply") || strings.Contains(posts[0], "NEVER PUBLIC") {
+	if lists != 1 || strings.Join(order, ",") != "public,private" || len(posts) != 1 || !strings.Contains(posts[0], "accepted public reply") || strings.Contains(posts[0], "NEVER PUBLIC") {
 		t.Fatalf("order=%v posts=%v", order, posts)
 	}
 	if !strings.Contains(logs.String(), "memoryEnabled=true") || strings.Contains(logs.String(), "NEVER PUBLIC") || strings.Contains(logs.String(), "key.secret") {

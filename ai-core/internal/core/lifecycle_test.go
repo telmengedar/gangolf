@@ -96,7 +96,7 @@ func TestShutdownDuringAFailingBootstrapStopsTheLoop(t *testing.T) {
 		}
 	}
 
-	finishes(t, "run kept retrying the bootstrap after its context ended", func() { r.core.Run(ctx) })
+	finishes(t, "run kept retrying the bootstrap after its context ended", func() { r.core.RunFixture(ctx) })
 
 	if len(r.messages.froms) != 3 {
 		t.Fatalf("polls = %d, want the loop to stop right after the cancelled attempt", len(r.messages.froms))
@@ -109,7 +109,7 @@ func TestShutdownDuringARunStopsTheLoop(t *testing.T) {
 	defer cancel()
 	blocker := &blockingRunner{entered: cancel}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	c := core.New(core.Config{Routes: selfRoutes(channel), BotName: "GangolfBot", Interval: time.Millisecond}, r.messages, blocker, log, func() time.Time { return r.clock })
+	c := core.New(core.Config{Routes: selfRoutes(channel), BotName: "GangolfBot"}, r.messages, blocker, log, func() time.Time { return r.clock })
 	r.messages.onList = func(n int) {
 		switch n {
 		case 2:
@@ -119,22 +119,9 @@ func TestShutdownDuringARunStopsTheLoop(t *testing.T) {
 		}
 	}
 
-	finishes(t, "run kept waiting on the model after its context ended", func() { c.Run(ctx) })
+	finishes(t, "run kept waiting on the model after its context ended", func() { c.RunFixture(ctx) })
 
 	if len(r.messages.posts) != 0 {
 		t.Fatalf("posts = %+v, want nothing posted for an interrupted run", r.messages.posts)
-	}
-}
-
-func TestPollingWithoutAConfiguredIntervalHappensEveryTwoSeconds(t *testing.T) {
-	r := newRig(t)
-	c := core.New(core.Config{Routes: selfRoutes(channel), BotName: "GangolfBot"}, r.messages, r.runner, slog.New(slog.NewTextHandler(io.Discard, nil)), func() time.Time { return r.clock })
-	ctx, cancel := context.WithTimeout(context.Background(), 2600*time.Millisecond)
-	defer cancel()
-
-	c.Run(ctx)
-
-	if len(r.messages.froms) != 2 {
-		t.Fatalf("polls in 2.6 s = %d, want the bootstrap and exactly one tick", len(r.messages.froms))
 	}
 }

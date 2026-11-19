@@ -59,6 +59,10 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		failure(w, 401, "unauthorized")
 		return
 	}
+	if r.URL.Path == "/api/v3/events/fence" {
+		s.eventFence(w, r)
+		return
+	}
 	if r.URL.Path == "/api/v3/events" {
 		s.streamEvents(w, r)
 		return

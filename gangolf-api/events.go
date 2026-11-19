@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
@@ -35,18 +36,23 @@ type eventEnvelope struct {
 }
 
 type eventFrame struct {
+	fence    string
 	envelope eventEnvelope
 	bytes    []byte
 }
 
 type eventSubscription struct {
-	user    string
-	filter  eventFilter
-	queue   chan eventFrame
-	done    chan struct{}
-	bytes   int
-	invalid bool
-	cancel  context.CancelFunc
+	id         string
+	credential [32]byte
+	principal  principal
+	fence      string
+	user       string
+	filter     eventFilter
+	queue      chan eventFrame
+	done       chan struct{}
+	bytes      int
+	invalid    bool
+	cancel     context.CancelFunc
 }
 
 type eventHub struct {
@@ -83,7 +89,11 @@ func (h *eventHub) subscribe(user string, filter eventFilter, cancel context.Can
 	if len(h.subs) >= eventStreams || user != "" && count >= eventUserStreams {
 		return nil, 429
 	}
-	sub := &eventSubscription{user: user, filter: filter, queue: make(chan eventFrame, eventQueue), done: make(chan struct{}), cancel: cancel}
+	var identity [16]byte
+	if _, err := rand.Read(identity[:]); err != nil {
+		return nil, 503
+	}
+	sub := &eventSubscription{id: hex.EncodeToString(identity[:]), user: user, filter: filter, queue: make(chan eventFrame, eventQueue), done: make(chan struct{}), cancel: cancel}
 	h.subs[sub] = struct{}{}
 	return sub, 0
 }
@@ -154,6 +164,9 @@ func (h *eventHub) consume(sub *eventSubscription, frame eventFrame) bool {
 		return false
 	}
 	sub.bytes -= len(frame.bytes)
+	if frame.fence != "" {
+		sub.fence = ""
+	}
 	return true
 }
 
@@ -200,4 +213,11 @@ func (s *server) createdLegacy(batch int64, index int, m message) {
 		Index           int     `json:"index"`
 		Message         message `json:"message"`
 	}{2, strconv.FormatInt(batch, 10), index, m})
+}
+
+func (h *eventHub) identify(sub *eventSubscription, p principal, token string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	sub.principal = p
+	sub.credential = sha256.Sum256([]byte(token))
 }
