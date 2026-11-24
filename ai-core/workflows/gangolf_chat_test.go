@@ -201,3 +201,76 @@ func TestBlueprint_RecallAndTransientExports_ExcludeWritesAndStalePolicy(t *test
 		}
 	}
 }
+
+func TestBlueprint_AcceptedReturns_SelectCheckedCandidates(t *testing.T) {
+	b := readGraph(t)
+	bodies := map[string]map[string]any{}
+	for _, node := range b.Nodes {
+		if node.Type != "process-step" {
+			continue
+		}
+		var body map[string]any
+		if err := json.Unmarshal(node.Body, &body); err != nil {
+			t.Fatal(err)
+		}
+		bodies[node.Symbol] = body
+	}
+	checks := []struct{ node, slot, source, path string }{
+		{"compose_response", "exports.draft", "result", "reply"},
+		{"check_draft", "exports.draft", "transport", "draft"},
+		{"return_draft", "output.reply", "transport", "draft"},
+		{"repair_response", "exports.candidate", "result", "reply"},
+		{"check_repair", "exports.candidate", "transport", "candidate"},
+		{"return_repaired", "output.reply", "transport", "candidate"},
+	}
+	for _, check := range checks {
+		t.Run(check.node+"/"+check.slot, func(t *testing.T) {
+			body, exists := bodies[check.node]
+			if !exists {
+				t.Fatalf("required stage missing=%s", check.node)
+			}
+			var value any = body
+			for _, key := range strings.Split(check.slot, ".") {
+				object, ok := value.(map[string]any)
+				if !ok {
+					t.Fatalf("binding parent is not an object=%s", check.slot)
+				}
+				value = object[key]
+			}
+			expected := map[string]any{"source": check.source, "path": check.path}
+			if !reflect.DeepEqual(value, expected) {
+				t.Fatalf("checked candidate binding=%v want=%v", value, expected)
+			}
+		})
+	}
+	for _, symbol := range []string{"check_draft", "check_repair"} {
+		body, exists := bodies[symbol]
+		if !exists {
+			t.Fatalf("required checker missing=%s", symbol)
+		}
+		items, ok := body["context"].([]any)
+		if !ok {
+			t.Fatal("checker context missing")
+		}
+		candidateFound := false
+		path := "draft"
+		if symbol == "check_repair" {
+			path = "candidate"
+		}
+		for _, item := range items {
+			context, ok := item.(map[string]any)
+			if !ok {
+				t.Fatal("checker context is not an object")
+			}
+			if context["key"] == "candidate" {
+				candidateFound = true
+				if context["required"] != true || !reflect.DeepEqual(context["value"], map[string]any{"source": "transport", "path": path}) {
+					t.Fatalf("checker selected a different candidate=%s", symbol)
+				}
+			}
+		}
+		if !candidateFound {
+			t.Fatalf("checker candidate missing=%s", symbol)
+		}
+	}
+}
