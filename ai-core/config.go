@@ -31,6 +31,8 @@ type config struct {
 	subject         int64
 	processorConfig int64
 	memoryConfig    int64
+	processID       int64
+	personaID       int64
 	set             []string
 	defaulted       []string
 }
@@ -88,6 +90,20 @@ func loadConfig(lookup func(string) (string, bool)) (config, error) {
 			return config{}, fmt.Errorf("PROCESSOR_CONFIG must be a positive integer")
 		}
 		cfg.processorConfig = processorConfig
+	}
+	process := get("PROCESSOR_PROCESS_ID", "")
+	persona := get("PROCESSOR_PERSONA_ID", "")
+	if process != "" || persona != "" {
+		cfg.processID, err = strconv.ParseInt(process, 10, 64)
+		if err != nil || cfg.processID <= 0 || strconv.FormatInt(cfg.processID, 10) != process {
+			return config{}, fmt.Errorf("PROCESSOR_PROCESS_ID must be a positive integer paired with PROCESSOR_PERSONA_ID")
+		}
+		cfg.personaID, err = strconv.ParseInt(persona, 10, 64)
+		if err != nil || cfg.personaID <= 0 || strconv.FormatInt(cfg.personaID, 10) != persona {
+			return config{}, fmt.Errorf("PROCESSOR_PERSONA_ID must be a positive integer paired with PROCESSOR_PROCESS_ID")
+		}
+		cfg.set, cfg.defaulted = set, defaulted
+		return cfg, nil
 	}
 	raw := get("PROCESSOR_MEMORY_CONFIG", "")
 	if raw == "" {

@@ -15,7 +15,11 @@ import (
 )
 
 func logStartup(log *slog.Logger, cfg config) {
-	log.Info("starting", "set", cfg.set, "defaulted", cfg.defaulted, "channels", len(cfg.channels), "routed", cfg.routed(), "memoryEnabled", true)
+	mode := "legacy"
+	if cfg.processID > 0 {
+		mode = "workflow"
+	}
+	log.Info("starting", "set", cfg.set, "defaulted", cfg.defaulted, "channels", len(cfg.channels), "routed", cfg.routed(), "memoryEnabled", cfg.processID == 0, "processorMode", mode, "processID", cfg.processID, "personaID", cfg.personaID)
 }
 
 func run(ctx context.Context, lookup func(string) (string, bool), log *slog.Logger) error {
@@ -26,8 +30,7 @@ func run(ctx context.Context, lookup func(string) (string, bool), log *slog.Logg
 	logStartup(log, cfg)
 
 	messageClient := messages.New(cfg.apiURL, cfg.apiKey, cfg.twitchBotUserID, nil, log)
-	processorClient := processor.New(cfg.processorURL, cfg.subject, cfg.processorConfig, nil)
-	reviewer := processor.New(cfg.processorURL, cfg.subject, cfg.memoryConfig, &http.Client{Timeout: processor.MemoryReviewTimeout})
+	processorClient, reviewer := processors(cfg)
 	core.New(core.Config{
 		MemoryReviewer: reviewer,
 		Routes:         cfg.routes,
@@ -35,6 +38,13 @@ func run(ctx context.Context, lookup func(string) (string, bool), log *slog.Logg
 		BotName:        cfg.botName,
 	}, messageClient, processorClient, log, time.Now).Run(ctx)
 	return nil
+}
+
+func processors(cfg config) (core.Runner, core.MemoryReviewer) {
+	if cfg.processID > 0 {
+		return processor.NewProcess(cfg.processorURL, cfg.processID, cfg.personaID, nil), nil
+	}
+	return processor.New(cfg.processorURL, cfg.subject, cfg.processorConfig, nil), processor.New(cfg.processorURL, cfg.subject, cfg.memoryConfig, &http.Client{Timeout: processor.MemoryReviewTimeout})
 }
 
 func main() {
