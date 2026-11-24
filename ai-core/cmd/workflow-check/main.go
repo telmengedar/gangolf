@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -167,15 +168,17 @@ func execute(input io.Reader, output io.Writer) error {
 	}
 	s.history = makeFrames(req.History, -50)
 	s.pending = makeFrames(req.Messages, 0)
-	runner := &recordingRunner{client: processor.NewProcess(req.BaseURL, req.ProcessID, req.PersonaID, nil), calls: []call{}}
+	capture := &captureTransport{base: http.DefaultTransport, exchanges: []processExchange{}}
+	runner := &recordingRunner{client: processor.NewProcess(req.BaseURL, req.ProcessID, req.PersonaID, &http.Client{Transport: capture, Timeout: processor.RunTimeout}), calls: []call{}}
 	var logs strings.Builder
 	core.New(core.Config{Routes: map[window.Key][]window.Key{key: {key}}, BotName: "GangolfBot"}, s, runner, slog.New(slog.NewTextHandler(&logs, nil)), time.Now).Run(ctx)
 	return json.NewEncoder(output).Encode(struct {
-		Completed bool   `json:"completed"`
-		Calls     []call `json:"calls"`
-		Posts     []post `json:"posts"`
-		Logs      string `json:"logs"`
-	}{s.completed && deadline.Err() == nil, runner.calls, s.posts, logs.String()})
+		Completed        bool              `json:"completed"`
+		Calls            []call            `json:"calls"`
+		Posts            []post            `json:"posts"`
+		Logs             string            `json:"logs"`
+		ProcessResponses []processExchange `json:"processResponses"`
+	}{s.completed && deadline.Err() == nil, runner.calls, s.posts, logs.String(), capture.exchanges})
 }
 
 func main() {
