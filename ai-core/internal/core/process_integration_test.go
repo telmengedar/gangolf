@@ -44,7 +44,7 @@ func TestTurn_ProcessOutcomes_PreservesDeliveryAndWithholding(t *testing.T) {
 			var requests []struct {
 				Arguments struct {
 					Message string            `json:"message"`
-					History []window.Exchange `json:"history"`
+					History []json.RawMessage `json:"history"`
 				} `json:"arguments"`
 			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -54,7 +54,7 @@ func TestTurn_ProcessOutcomes_PreservesDeliveryAndWithholding(t *testing.T) {
 				var req struct {
 					Arguments struct {
 						Message string            `json:"message"`
-						History []window.Exchange `json:"history"`
+						History []json.RawMessage `json:"history"`
 					} `json:"arguments"`
 				}
 				json.NewDecoder(r.Body).Decode(&req)
@@ -80,6 +80,14 @@ func TestTurn_ProcessOutcomes_PreservesDeliveryAndWithholding(t *testing.T) {
 			}
 			if len(requests) != tc.calls || !strings.Contains(requests[0].Arguments.Message, "Ada: correction: I live in Köln") || !strings.Contains(requests[0].Arguments.Message, "Mara: Gangolf, where does Ada live?") || len(requests[0].Arguments.History) == 0 {
 				t.Fatalf("actual workflow input/calls=%+v", requests)
+			}
+			var prior map[string]any
+			if err := json.Unmarshal(requests[0].Arguments.History[0], &prior); err != nil {
+				t.Fatal(err)
+			}
+			assistant, ok := prior["reply"].(map[string]any)
+			if !ok || assistant["role"] != "assistant" || assistant["author"] != "Gangolf" || assistant["text"] != "previous reply" {
+				t.Fatal("trusted own reply provenance lost in actual core request")
 			}
 			if tc.calls == 2 && !strings.Contains(requests[1].Arguments.Message, "was not sent") {
 				t.Fatal("repeat reask contract lost")

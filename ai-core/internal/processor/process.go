@@ -29,6 +29,17 @@ type ProcessError struct {
 	Cause  error
 }
 
+type workflowExchange struct {
+	Input string         `json:"input"`
+	Reply *workflowReply `json:"reply,omitempty"`
+}
+
+type workflowReply struct {
+	Role   string `json:"role"`
+	Author string `json:"author"`
+	Text   string `json:"text"`
+}
+
 func (e *ProcessError) Error() string {
 	return fmt.Sprintf("processor process: %s (HTTP %d)", e.Code, e.Status)
 }
@@ -51,9 +62,12 @@ func (c *ProcessClient) Run(ctx context.Context, input string, history []window.
 	if len(history) > 4 {
 		history = history[len(history)-4:]
 	}
-	exchanges := make([]wireExchange, len(history))
+	exchanges := make([]workflowExchange, len(history))
 	for i, item := range history {
-		exchanges[i] = wireExchange{Input: item.Input, Reply: item.Reply}
+		exchanges[i] = workflowExchange{Input: item.Input}
+		if item.Reply != "" {
+			exchanges[i].Reply = &workflowReply{Role: "assistant", Author: "Gangolf", Text: item.Reply}
+		}
 	}
 	encoded, err := json.Marshal(map[string]any{
 		"processId": c.processID,

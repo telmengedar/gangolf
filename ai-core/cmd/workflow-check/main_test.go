@@ -28,13 +28,19 @@ func TestExecute_RealCoreProcessTurn_RecordsPrivateSink(t *testing.T) {
 				}
 				var req struct {
 					Arguments struct {
-						Message string              `json:"message"`
-						History []map[string]string `json:"history"`
+						Message string                       `json:"message"`
+						History []map[string]json.RawMessage `json:"history"`
 					} `json:"arguments"`
 				}
-				json.NewDecoder(r.Body).Decode(&req)
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					t.Error(err)
+				}
 				if !strings.Contains(req.Arguments.Message, "Ada: correction") || len(req.Arguments.History) != 1 {
 					t.Errorf("actual core input=%+v", req)
+				}
+				var assistant map[string]string
+				if len(req.Arguments.History) != 1 || json.Unmarshal(req.Arguments.History[0]["reply"], &assistant) != nil || assistant["role"] != "assistant" || assistant["author"] != "Gangolf" || assistant["text"] != "old reply" {
+					t.Error("actual private adapter lost assistant provenance")
 				}
 				if !reply {
 					w.WriteHeader(422)
