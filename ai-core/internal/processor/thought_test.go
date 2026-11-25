@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -162,5 +163,25 @@ func TestReview_InvalidThoughtEvidence_FailsBeforeHTTP(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatal("invalid evidence reached process")
+	}
+}
+
+func TestReview_ContradictoryPartialWrite_RejectsSuccessfulDisposition(t *testing.T) {
+	for _, state := range []string{"abstained", "stored"} {
+		t.Run(state, func(t *testing.T) {
+			body := thoughtResponse(state)
+			body["trace"] = append(body["trace"].([]any), map[string]any{"ordinal": 5, "stepId": 92, "kind": "action", "repair": map[string]any{"nodeId": 601}})
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; json.NewEncoder(w).Encode(body) }))
+			defer server.Close()
+			result, err := processor.NewThoughtProcess(server.URL, 81, server.Client()).Review(context.Background(), []window.Utterance{{ID: "121", Speaker: "Lena", Text: "reaction"}}, nil, "delivered")
+			if calls != 1 || result.Thought == nil || !slices.Contains(result.Thought.RepairIDs, int64(601)) {
+				t.Fatal("partial write scenario or allocation evidence missing")
+			}
+			var failure *processor.ProcessError
+			if !errors.As(err, &failure) || failure.Code != "memory_write_incomplete" || failure.Status != 200 || result.State != "" || result.NoteID != 0 || result.Thought.Receipt != nil {
+				t.Fatalf("contradictory partial write accepted: state=%s node=%d err=%v", result.State, result.NoteID, err)
+			}
+		})
 	}
 }

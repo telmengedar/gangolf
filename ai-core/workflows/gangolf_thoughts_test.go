@@ -169,3 +169,46 @@ func TestThoughtGraph_SkipAndStorageBranches_RequireExactControlAndRuntimeReceip
 		t.Fatal("extra success fallback")
 	}
 }
+
+func TestThoughtGraph_RecalledProse_ReachesNoveltyConsumerWithoutProjection(t *testing.T) {
+	b := readThoughtGraph(t)
+	producer, consumer := false, false
+	for _, node := range b.Nodes {
+		if node.Type != "process-step" {
+			continue
+		}
+		var body map[string]any
+		if err := json.Unmarshal(node.Body, &body); err != nil {
+			t.Fatal(err)
+		}
+		if node.Symbol == "recall_thoughts" {
+			producer = true
+			expected := map[string]any{"existingThoughts": map[string]any{"source": "result", "path": "value"}}
+			if !reflect.DeepEqual(body["exports"], expected) {
+				t.Fatalf("recalled prose export changed=%v", body["exports"])
+			}
+		}
+		if node.Symbol == "create_insight" {
+			contexts, ok := body["context"].([]any)
+			if !ok {
+				t.Fatal("novelty consumer context missing")
+			}
+			for _, entry := range contexts {
+				selected, ok := entry.(map[string]any)
+				if !ok {
+					t.Fatal("invalid selected context")
+				}
+				if selected["key"] == "existingThoughts" {
+					consumer = true
+					expected := map[string]any{"key": "existingThoughts", "required": true, "value": map[string]any{"source": "transport", "path": "existingThoughts"}}
+					if !reflect.DeepEqual(selected, expected) {
+						t.Fatal("novelty consumer does not require complete recalled data")
+					}
+				}
+			}
+		}
+	}
+	if !producer || !consumer {
+		t.Fatal("recalled prose producer or novelty consumer missing")
+	}
+}

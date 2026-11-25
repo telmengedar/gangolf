@@ -118,6 +118,7 @@ func (c *ThoughtClient) Review(ctx context.Context, lines []window.Utterance, hi
 	if json.Unmarshal(raw["trace"], &traces) != nil || len(traces) > 32 {
 		return result, &ProcessError{Code: "invalid_thought_trace", Status: status}
 	}
+	partialWrite := false
 	for _, trace := range traces {
 		for _, receipt := range trace.Receipts {
 			if receipt.Operation == "memorize" && receipt.NodeID > 0 {
@@ -127,8 +128,11 @@ func (c *ThoughtClient) Review(ctx context.Context, lines []window.Utterance, hi
 		if trace.Kind == "judgement" {
 			result.ModelCalls++
 		}
-		if trace.Repair != nil && trace.Repair.NodeID > 0 {
-			metadata.RepairIDs = append(metadata.RepairIDs, trace.Repair.NodeID)
+		if trace.Repair != nil {
+			partialWrite = true
+			if trace.Repair.NodeID > 0 {
+				metadata.RepairIDs = append(metadata.RepairIDs, trace.Repair.NodeID)
+			}
 		}
 	}
 	envelope, err := c.process.envelope(status, body)
@@ -141,6 +145,9 @@ func (c *ThoughtClient) Review(ctx context.Context, lines []window.Utterance, hi
 	}
 	json.Unmarshal(envelope["process"], &identity)
 	metadata.ProcessHash = identity.Hash
+	if partialWrite {
+		return fail("memory_write_incomplete")
+	}
 	output, err := processObject(envelope["output"])
 	if err != nil || len(output) != 1 {
 		return fail("invalid_thought_output")
