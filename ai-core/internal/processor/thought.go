@@ -160,7 +160,7 @@ func (c *ThoughtClient) Review(ctx context.Context, lines []window.Utterance, hi
 	if json.Unmarshal(thought["state"], &state) != nil {
 		return fail("invalid_thought_output")
 	}
-	if result.ModelCalls < 1 || result.ModelCalls > 2 {
+	if result.ModelCalls < 1 || result.ModelCalls > 3 {
 		return fail("invalid_thought_trace")
 	}
 	receipt, err := processObject(thought["receipt"])

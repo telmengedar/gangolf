@@ -25,7 +25,7 @@ func readThoughtGraph(t *testing.T) blueprint {
 
 func TestThoughtGraph_FrozenPrompts_SelectsOnlyAttributedEvidence(t *testing.T) {
 	b := readThoughtGraph(t)
-	expectedHashes := map[string]string{"query_template": "3e60a467e8141b216f9f383aeb825502a6f30b0f7bf4d28be266a0e059865892", "insight_template": "783507f08a95f0ae7b8a82e919fa1f72829e231d7190bf4eb66873eaad4dc6b3"}
+	expectedHashes := map[string]string{"query_template": "3e60a467e8141b216f9f383aeb825502a6f30b0f7bf4d28be266a0e059865892", "insight_template": "783507f08a95f0ae7b8a82e919fa1f72829e231d7190bf4eb66873eaad4dc6b3", "guard_template": "f0a3f4386297fb0ec10294b4d197dc80f581cff7fbde57335f5b81908faa93a6"}
 	templates, judgements := 0, 0
 	for _, node := range b.Nodes {
 		if node.Type == "process-prompt-template" {
@@ -52,8 +52,11 @@ func TestThoughtGraph_FrozenPrompts_SelectsOnlyAttributedEvidence(t *testing.T) 
 			t.Fatal("thought judgement can select writes")
 		}
 		expected := []any{map[string]any{"key": "latest", "required": true, "value": map[string]any{"source": "argument", "path": "latest"}}, map[string]any{"key": "history", "required": true, "value": map[string]any{"source": "argument", "path": "history"}}, map[string]any{"key": "assistantReply", "required": true, "value": map[string]any{"source": "argument", "path": "assistantReply"}}}
-		if node.Symbol == "create_insight" {
+		if node.Symbol == "create_insight" || node.Symbol == "check_insight" {
 			expected = append(expected, map[string]any{"key": "existingThoughts", "required": true, "value": map[string]any{"source": "transport", "path": "existingThoughts"}})
+			if node.Symbol == "check_insight" {
+				expected = append(expected, map[string]any{"key": "candidate", "required": true, "value": map[string]any{"source": "transport", "path": "candidate"}})
+			}
 		} else if node.Symbol != "prepare_insight_query" {
 			t.Fatal("extra inference stage")
 		}
@@ -61,7 +64,7 @@ func TestThoughtGraph_FrozenPrompts_SelectsOnlyAttributedEvidence(t *testing.T) 
 			t.Fatalf("thought context authority/scope changed=%s", node.Symbol)
 		}
 	}
-	if templates != 2 || judgements != 2 || len(b.Inputs) != 3 || b.Inputs["latest"].Type != "array" || b.Inputs["history"].Type != "array" || b.Inputs["assistantReply"].Type != "string" || len(b.Outputs) != 1 || b.Outputs["thought"].Type != "object" {
+	if templates != 3 || judgements != 3 || len(b.Inputs) != 3 || b.Inputs["latest"].Type != "array" || b.Inputs["history"].Type != "array" || b.Inputs["assistantReply"].Type != "string" || len(b.Outputs) != 1 || b.Outputs["thought"].Type != "object" {
 		t.Fatal("companion interface or inference budget changed")
 	}
 }
@@ -106,7 +109,7 @@ func TestThoughtGraph_PrivateOwnedTarget_PreventsModelPlacementAndProvenanceGues
 			}
 		}
 		if node.Symbol == "persist_insight" {
-			if !reflect.DeepEqual(body["input"], map[string]any{"text": map[string]any{"source": "transport", "path": "thought"}}) {
+			if !reflect.DeepEqual(body["input"], map[string]any{"text": map[string]any{"source": "transport", "path": "candidate"}}) {
 				t.Fatal("thought body gains transcript/provenance or model placement")
 			}
 		}
@@ -121,7 +124,7 @@ func TestThoughtGraph_SkipAndStorageBranches_RequireExactControlAndRuntimeReceip
 	skips := 0
 	storedEdges := 0
 	for _, edge := range b.Edges {
-		if edge.From == "prepare_insight_query" || edge.From == "create_insight" {
+		if edge.From == "prepare_insight_query" || edge.From == "create_insight" || edge.From == "check_insight" {
 			if edge.To == "return_abstained" {
 				skips++
 				if edge.When == nil || edge.When.Path != "reply" || edge.When.Equals != "SKIP" || edge.Default {
@@ -136,7 +139,7 @@ func TestThoughtGraph_SkipAndStorageBranches_RequireExactControlAndRuntimeReceip
 			}
 		}
 	}
-	if skips != 2 || storedEdges != 1 {
+	if skips != 3 || storedEdges != 1 {
 		t.Fatal("skip/persistence control changed")
 	}
 	returns := 0
@@ -147,7 +150,7 @@ func TestThoughtGraph_SkipAndStorageBranches_RequireExactControlAndRuntimeReceip
 		var body map[string]any
 		json.Unmarshal(node.Body, &body)
 		if node.Symbol == "create_insight" {
-			if !reflect.DeepEqual(body["exports"], map[string]any{"thought": map[string]any{"source": "result", "path": "reply"}}) {
+			if !reflect.DeepEqual(body["exports"], map[string]any{"candidate": map[string]any{"source": "result", "path": "reply"}, "existingThoughts": map[string]any{"source": "transport", "path": "existingThoughts"}}) {
 				t.Fatal("persisted thought not exact generated prose")
 			}
 		}
@@ -210,5 +213,82 @@ func TestThoughtGraph_RecalledProse_ReachesNoveltyConsumerWithoutProjection(t *t
 	}
 	if !producer || !consumer {
 		t.Fatal("recalled prose producer or novelty consumer missing")
+	}
+}
+
+func TestThoughtGraph_AdmissionGate_PersistsOnlyOriginalApprovedCandidate(t *testing.T) {
+	b := readThoughtGraph(t)
+	bodies := map[string]map[string]any{}
+	for _, node := range b.Nodes {
+		if node.Type != "process-step" {
+			continue
+		}
+		var body map[string]any
+		if json.Unmarshal(node.Body, &body) != nil {
+			t.Fatal("invalid step")
+		}
+		bodies[node.Symbol] = body
+	}
+	creation, exists := bodies["create_insight"]
+	if !exists {
+		t.Fatal("candidate producer missing")
+	}
+	expectedCreation := map[string]any{"candidate": map[string]any{"source": "result", "path": "reply"}, "existingThoughts": map[string]any{"source": "transport", "path": "existingThoughts"}}
+	if !reflect.DeepEqual(creation["exports"], expectedCreation) {
+		t.Fatal("admission lost original candidate or actual prior thought prose")
+	}
+	guard, exists := bodies["check_insight"]
+	if !exists {
+		t.Fatal("candidate can bypass missing admission gate")
+	}
+	if !reflect.DeepEqual(guard["exports"], map[string]any{"candidate": map[string]any{"source": "transport", "path": "candidate"}}) {
+		t.Fatal("guard verdict or rewritten text can replace original candidate")
+	}
+	persist, exists := bodies["persist_insight"]
+	if !exists || !reflect.DeepEqual(persist["input"], map[string]any{"text": map[string]any{"source": "transport", "path": "candidate"}}) {
+		t.Fatal("persist does not consume the original approved candidate")
+	}
+	incoming := 0
+	routes := map[string]string{}
+	createdGate := false
+	for _, edge := range b.Edges {
+		if edge.Role != "" {
+			continue
+		}
+		if edge.From == "create_insight" && edge.Default {
+			createdGate = edge.To == "check_insight"
+		}
+		if edge.To == "persist_insight" {
+			incoming++
+			if edge.From != "check_insight" || edge.Default || edge.When == nil || edge.When.Path != "reply" || edge.When.Equals != "STORE" {
+				t.Fatal("candidate can bypass exact admission STORE")
+			}
+		}
+		if edge.From == "check_insight" {
+			if edge.Default || edge.When == nil || edge.When.Path != "reply" {
+				t.Fatal("malformed guard output can fall back")
+			}
+			token, ok := edge.When.Equals.(string)
+			if !ok {
+				t.Fatal("nontext guard decision")
+			}
+			if _, duplicate := routes[token]; duplicate {
+				t.Fatal("ambiguous guard decision")
+			}
+			routes[token] = edge.To
+		}
+	}
+	if !createdGate || incoming != 1 || !reflect.DeepEqual(routes, map[string]string{"STORE": "persist_insight", "SKIP": "return_abstained"}) {
+		t.Fatal("strict admission route changed")
+	}
+	actualBadCandidate := "Ada's statement about indigo being her favorite color is a simple declaration of preference."
+	sum := sha256.Sum256([]byte(actualBadCandidate))
+	if hex.EncodeToString(sum[:]) != "f0b94a4526d523f846ac9603625c220d12b724a3c0da5e24851a879d6a6979d1" {
+		t.Fatal("observed counterexample bytes changed")
+	}
+	for _, invalid := range []string{"STORE ", "store", "STORE\n", `{"decision":"STORE"}`, actualBadCandidate, "No new insight should be stored."} {
+		if _, allowed := routes[invalid]; allowed {
+			t.Fatal("guard explanation/nonexact control can authorize persistence")
+		}
 	}
 }
