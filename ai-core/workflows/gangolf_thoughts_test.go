@@ -25,7 +25,7 @@ func readThoughtGraph(t *testing.T) blueprint {
 
 func TestThoughtGraph_FrozenPrompts_SelectsOnlyAttributedEvidence(t *testing.T) {
 	b := readThoughtGraph(t)
-	expectedHashes := map[string]string{"query_template": "3e60a467e8141b216f9f383aeb825502a6f30b0f7bf4d28be266a0e059865892", "insight_template": "783507f08a95f0ae7b8a82e919fa1f72829e231d7190bf4eb66873eaad4dc6b3", "guard_template": "f0a3f4386297fb0ec10294b4d197dc80f581cff7fbde57335f5b81908faa93a6"}
+	expectedHashes := map[string]string{"query_template": "3e60a467e8141b216f9f383aeb825502a6f30b0f7bf4d28be266a0e059865892", "insight_template": "783507f08a95f0ae7b8a82e919fa1f72829e231d7190bf4eb66873eaad4dc6b3", "guard_template": "6d4525438a1ebec849e03eb4c0874c3e44603dfc3b18699f8edc1cbedffb0cac"}
 	templates, judgements := 0, 0
 	for _, node := range b.Nodes {
 		if node.Type == "process-prompt-template" {
@@ -124,7 +124,7 @@ func TestThoughtGraph_SkipAndStorageBranches_RequireExactControlAndRuntimeReceip
 	skips := 0
 	storedEdges := 0
 	for _, edge := range b.Edges {
-		if edge.From == "prepare_insight_query" || edge.From == "create_insight" || edge.From == "check_insight" {
+		if edge.From == "prepare_insight_query" || edge.From == "create_insight" {
 			if edge.To == "return_abstained" {
 				skips++
 				if edge.When == nil || edge.When.Path != "reply" || edge.When.Equals != "SKIP" || edge.Default {
@@ -139,7 +139,7 @@ func TestThoughtGraph_SkipAndStorageBranches_RequireExactControlAndRuntimeReceip
 			}
 		}
 	}
-	if skips != 3 || storedEdges != 1 {
+	if skips != 2 || storedEdges != 1 {
 		t.Fatal("skip/persistence control changed")
 	}
 	returns := 0
@@ -161,14 +161,14 @@ func TestThoughtGraph_SkipAndStorageBranches_RequireExactControlAndRuntimeReceip
 		expected := map[string]any{"thought": map[string]any{"state": "abstained", "receipt": map[string]any{}}}
 		if node.Symbol == "return_stored" {
 			expected = map[string]any{"thought": map[string]any{"state": "stored", "receipt": map[string]any{"source": "receipt", "path": "latest"}}}
-		} else if node.Symbol != "return_abstained" {
+		} else if node.Symbol != "return_abstained" && node.Symbol != "return_unsupported" && node.Symbol != "return_duplicate" {
 			t.Fatal("unexpected return")
 		}
 		if !reflect.DeepEqual(body["output"], expected) {
 			t.Fatal("thought receipt synthesized from prose or abstention ambiguous")
 		}
 	}
-	if returns != 2 {
+	if returns != 4 {
 		t.Fatal("extra success fallback")
 	}
 }
@@ -260,8 +260,8 @@ func TestThoughtGraph_AdmissionGate_PersistsOnlyOriginalApprovedCandidate(t *tes
 		}
 		if edge.To == "persist_insight" {
 			incoming++
-			if edge.From != "check_insight" || edge.Default || edge.When == nil || edge.When.Path != "reply" || edge.When.Equals != "STORE" {
-				t.Fatal("candidate can bypass exact admission STORE")
+			if edge.From != "check_insight" || edge.Default || edge.When == nil || edge.When.Path != "reply" || edge.When.Equals != "INSIGHT" {
+				t.Fatal("candidate can bypass exact admission INSIGHT")
 			}
 		}
 		if edge.From == "check_insight" {
@@ -278,15 +278,26 @@ func TestThoughtGraph_AdmissionGate_PersistsOnlyOriginalApprovedCandidate(t *tes
 			routes[token] = edge.To
 		}
 	}
-	if !createdGate || incoming != 1 || !reflect.DeepEqual(routes, map[string]string{"STORE": "persist_insight", "SKIP": "return_abstained"}) {
+	if !createdGate || incoming != 1 || !reflect.DeepEqual(routes, map[string]string{"INSIGHT": "persist_insight", "REPORT": "return_abstained", "UNSUPPORTED": "return_unsupported", "DUPLICATE": "return_duplicate"}) {
 		t.Fatal("strict admission route changed")
 	}
-	actualBadCandidate := "Ada's statement about indigo being her favorite color is a simple declaration of preference."
+	for _, rejected := range []string{"REPORT", "UNSUPPORTED", "DUPLICATE"} {
+		destination := routes[rejected]
+		if bodies[destination]["kind"] != "return" || !reflect.DeepEqual(bodies[destination]["output"], map[string]any{"thought": map[string]any{"state": "abstained", "receipt": map[string]any{}}}) {
+			t.Fatalf("rejected category can claim storage=%s", rejected)
+		}
+		for _, edge := range b.Edges {
+			if edge.From == destination && edge.Role == "" {
+				t.Fatalf("rejected category can continue to a write=%s", rejected)
+			}
+		}
+	}
+	actualBadCandidate := "Ada stated her favorite color is indigo."
 	sum := sha256.Sum256([]byte(actualBadCandidate))
-	if hex.EncodeToString(sum[:]) != "f0b94a4526d523f846ac9603625c220d12b724a3c0da5e24851a879d6a6979d1" {
+	if hex.EncodeToString(sum[:]) != "da575599d5ae9750feea0def5e1968dbe67ad30e5d0424d3907984498a2e809a" {
 		t.Fatal("observed counterexample bytes changed")
 	}
-	for _, invalid := range []string{"STORE ", "store", "STORE\n", `{"decision":"STORE"}`, actualBadCandidate, "No new insight should be stored."} {
+	for _, invalid := range []string{"STORE", "SKIP", "INSIGHT ", "insight", "INSIGHT\n", `{"decision":"INSIGHT"}`, actualBadCandidate, "No new insight should be stored."} {
 		if _, allowed := routes[invalid]; allowed {
 			t.Fatal("guard explanation/nonexact control can authorize persistence")
 		}
