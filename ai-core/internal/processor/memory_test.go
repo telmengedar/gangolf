@@ -36,7 +36,7 @@ func TestReviewUsesExactSourceTranscriptWithoutMutatingChatHistoryAndReturnsOnly
 	reply := "A final \"reply\"\nwith Unicode’s punctuation"
 	history := []window.Exchange{{Input: "earlier speaker: hello", Reply: "OLD GENERATED REPLY"}, {Input: "Mara: Unicode’s \"statement\"\nAlex: a correction", Reply: "OTHER GENERATED REPLY"}}
 	originalHistory := append([]window.Exchange(nil), history...)
-	result, err := client.Review(context.Background(), lines, history)
+	result, err := client.Review(context.Background(), lines, history, "ignored delivered reply")
 	if err != nil || result != (processor.MemoryResult{State: "stored", NoteID: 81, ModelCalls: 1}) {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -135,7 +135,7 @@ func TestReviewValidatesEveryDecisionAndPersistenceCombination(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			client, _, _ := serve(t, 200, tc.body)
-			got, err := client.Review(context.Background(), []window.Utterance{{Speaker: "Mara", Text: "x"}}, nil)
+			got, err := client.Review(context.Background(), []window.Utterance{{Speaker: "Mara", Text: "x"}}, nil, "ignored delivered reply")
 			if tc.bad {
 				if err == nil {
 					t.Fatalf("accepted invalid receipt %+v", got)
@@ -168,7 +168,7 @@ func TestReviewCancellationAndHTTPTimeoutDoNotRetry(t *testing.T) {
 			defer cancel()
 			done := make(chan error, 1)
 			go func() {
-				_, err := client.Review(ctx, []window.Utterance{{Speaker: "Mara", Text: "x"}}, nil)
+				_, err := client.Review(ctx, []window.Utterance{{Speaker: "Mara", Text: "x"}}, nil, "ignored delivered reply")
 				done <- err
 			}()
 			<-entered
@@ -189,7 +189,7 @@ func TestReviewCancellationAndHTTPTimeoutDoNotRetry(t *testing.T) {
 
 func TestReviewHTTPFailureIsNotAnAbstention(t *testing.T) {
 	client, _, _ := serve(t, 502, `{"error":{"code":"model_unavailable","message":"failed"}}`)
-	if _, err := client.Review(context.Background(), []window.Utterance{{Speaker: "Mara", Text: "x"}}, nil); err == nil {
+	if _, err := client.Review(context.Background(), []window.Utterance{{Speaker: "Mara", Text: "x"}}, nil, "ignored delivered reply"); err == nil {
 		t.Fatal("non-200 accepted")
 	}
 }
@@ -220,7 +220,7 @@ func TestReviewRejectsInvalidTranscriptBeforeHTTP(t *testing.T) {
 			}))
 			defer server.Close()
 			client := processor.New(server.URL, 1090, 4242, server.Client())
-			_, err := client.Review(context.Background(), tc.lines, tc.history)
+			_, err := client.Review(context.Background(), tc.lines, tc.history, "ignored delivered reply")
 			if err == nil {
 				t.Fatal("invalid source accepted")
 			}
@@ -249,7 +249,7 @@ func TestReviewTranscriptExactByteCeiling(t *testing.T) {
 			overhead := len(`{"history":[],"latest":[{"speaker":"Sora","text":""}]}`)
 			text := strings.Repeat("a", 8192-overhead+extra)
 			client := processor.New(server.URL, 1090, 4242, server.Client())
-			result, err := client.Review(context.Background(), []window.Utterance{{Speaker: "Sora", Text: text}}, nil)
+			result, err := client.Review(context.Background(), []window.Utterance{{Speaker: "Sora", Text: text}}, nil, "ignored delivered reply")
 			if extra == 0 {
 				if err != nil || result.State != "abstained" || calls != 1 || len(sourceText) != 8192 {
 					t.Fatalf("result=%+v err=%v calls=%d bytes=%d", result, err, calls, len(sourceText))

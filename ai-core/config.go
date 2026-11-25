@@ -20,21 +20,22 @@ const (
 )
 
 type config struct {
-	apiURL          string
-	apiKey          string
-	twitchBotUserID string
-	channels        []window.Key
-	routes          map[window.Key][]window.Key
-	minWords        map[window.Key]int
-	botName         string
-	processorURL    string
-	subject         int64
-	processorConfig int64
-	memoryConfig    int64
-	processID       int64
-	personaID       int64
-	set             []string
-	defaulted       []string
+	apiURL           string
+	apiKey           string
+	twitchBotUserID  string
+	channels         []window.Key
+	routes           map[window.Key][]window.Key
+	minWords         map[window.Key]int
+	botName          string
+	processorURL     string
+	subject          int64
+	processorConfig  int64
+	memoryConfig     int64
+	processID        int64
+	personaID        int64
+	thoughtProcessID int64
+	set              []string
+	defaulted        []string
 }
 
 func loadConfig(lookup func(string) (string, bool)) (config, error) {
@@ -91,6 +92,13 @@ func loadConfig(lookup func(string) (string, bool)) (config, error) {
 		}
 		cfg.processorConfig = processorConfig
 	}
+	thought := get("PROCESSOR_THOUGHT_PROCESS_ID", "")
+	if thought != "" {
+		cfg.thoughtProcessID, err = strconv.ParseInt(thought, 10, 64)
+		if err != nil || cfg.thoughtProcessID <= 0 || strconv.FormatInt(cfg.thoughtProcessID, 10) != thought {
+			return config{}, fmt.Errorf("PROCESSOR_THOUGHT_PROCESS_ID must be a canonical positive integer")
+		}
+	}
 	process := get("PROCESSOR_PROCESS_ID", "")
 	persona := get("PROCESSOR_PERSONA_ID", "")
 	if process != "" || persona != "" {
@@ -104,6 +112,9 @@ func loadConfig(lookup func(string) (string, bool)) (config, error) {
 		}
 		cfg.set, cfg.defaulted = set, defaulted
 		return cfg, nil
+	}
+	if cfg.thoughtProcessID > 0 {
+		return config{}, fmt.Errorf("PROCESSOR_THOUGHT_PROCESS_ID requires workflow mode")
 	}
 	raw := get("PROCESSOR_MEMORY_CONFIG", "")
 	if raw == "" {

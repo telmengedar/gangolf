@@ -64,3 +64,30 @@ func TestProcessors_AbsentWorkflowPair_PreservesLegacyReviewer(t *testing.T) {
 		t.Fatal("legacy runner/reviewer changed")
 	}
 }
+
+func TestProcessors_ThoughtSelector_WiresCompanionWithoutLegacyReviewer(t *testing.T) {
+	cfg, err := loadConfig(env(map[string]string{"GANGOLF_API_KEY": "test.key", "GANGOLF_TWITCH_BOT_USER_ID": "99", "GANGOLF_CHANNELS": "Twitch/123", "PROCESSOR_PROCESS_ID": "81", "PROCESSOR_PERSONA_ID": "92", "PROCESSOR_THOUGHT_PROCESS_ID": "82"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner, reviewer := processors(cfg)
+	if _, ok := runner.(*processor.ProcessClient); !ok {
+		t.Fatal("chat workflow changed")
+	}
+	if _, ok := reviewer.(*processor.ThoughtClient); !ok || cfg.thoughtProcessID != 82 {
+		t.Fatal("explicit companion binding not consumed")
+	}
+}
+
+func TestLoadConfig_InvalidThoughtSelector_RejectsBeforeStartup(t *testing.T) {
+	for _, value := range []string{"0", "-1", "01", "+82", "not-id"} {
+		_, err := loadConfig(env(map[string]string{"GANGOLF_API_KEY": "test.key", "GANGOLF_TWITCH_BOT_USER_ID": "99", "GANGOLF_CHANNELS": "Twitch/123", "PROCESSOR_PROCESS_ID": "81", "PROCESSOR_PERSONA_ID": "92", "PROCESSOR_THOUGHT_PROCESS_ID": value}))
+		if err == nil {
+			t.Fatalf("invalid thought selector accepted=%s", value)
+		}
+	}
+	_, err := loadConfig(env(map[string]string{"GANGOLF_API_KEY": "test.key", "GANGOLF_TWITCH_BOT_USER_ID": "99", "GANGOLF_CHANNELS": "Twitch/123", "PROCESSOR_THOUGHT_PROCESS_ID": "82", "PROCESSOR_MEMORY_CONFIG": "7"}))
+	if err == nil {
+		t.Fatal("legacy mode silently accepted thought selector")
+	}
+}

@@ -19,7 +19,7 @@ func logStartup(log *slog.Logger, cfg config) {
 	if cfg.processID > 0 {
 		mode = "workflow"
 	}
-	log.Info("starting", "set", cfg.set, "defaulted", cfg.defaulted, "channels", len(cfg.channels), "routed", cfg.routed(), "memoryEnabled", cfg.processID == 0, "processorMode", mode, "processID", cfg.processID, "personaID", cfg.personaID)
+	log.Info("starting", "set", cfg.set, "defaulted", cfg.defaulted, "channels", len(cfg.channels), "routed", cfg.routed(), "memoryEnabled", cfg.processID == 0 || cfg.thoughtProcessID > 0, "processorMode", mode, "processID", cfg.processID, "personaID", cfg.personaID, "thoughtProcessID", cfg.thoughtProcessID)
 }
 
 func run(ctx context.Context, lookup func(string) (string, bool), log *slog.Logger) error {
@@ -42,7 +42,11 @@ func run(ctx context.Context, lookup func(string) (string, bool), log *slog.Logg
 
 func processors(cfg config) (core.Runner, core.MemoryReviewer) {
 	if cfg.processID > 0 {
-		return processor.NewProcess(cfg.processorURL, cfg.processID, cfg.personaID, nil), nil
+		var reviewer core.MemoryReviewer
+		if cfg.thoughtProcessID > 0 {
+			reviewer = processor.NewThoughtProcess(cfg.processorURL, cfg.thoughtProcessID, nil)
+		}
+		return processor.NewProcess(cfg.processorURL, cfg.processID, cfg.personaID, nil), reviewer
 	}
 	return processor.New(cfg.processorURL, cfg.subject, cfg.processorConfig, nil), processor.New(cfg.processorURL, cfg.subject, cfg.memoryConfig, &http.Client{Timeout: processor.MemoryReviewTimeout})
 }

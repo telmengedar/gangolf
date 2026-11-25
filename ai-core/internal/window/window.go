@@ -42,6 +42,7 @@ type Exchange struct {
 
 // Utterance is one pending line as a speaker and a text.
 type Utterance struct {
+	ID             string
 	Speaker        string
 	Text           string
 	CannotStartRun bool
@@ -232,7 +233,7 @@ func (w *Windows) Take(key Key) Batch {
 	spoken := make([]Utterance, len(pending))
 	for i, e := range pending {
 		lines[i] = speak(e)
-		spoken[i] = Utterance{Speaker: e.Speaker, Text: e.Text, CannotStartRun: e.CannotStartRun}
+		spoken[i] = Utterance{ID: e.ID, Speaker: e.Speaker, Text: e.Text, CannotStartRun: e.CannotStartRun}
 	}
 	batch := Batch{
 		Input:   strings.Join(lines, "\n"),
