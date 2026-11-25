@@ -186,36 +186,22 @@ func TestReview_ContradictoryPartialWrite_RejectsSuccessfulDisposition(t *testin
 	}
 }
 
-func TestReview_ConditionalComparison_AcceptsFourthJudgementWithNativeReceipt(t *testing.T) {
-	for _, state := range []string{"stored", "abstained"} {
-		t.Run(state, func(t *testing.T) {
-			body := thoughtResponse("stored")
-			receipt := body["output"].(map[string]any)["thought"].(map[string]any)["receipt"].(map[string]any)
-			receipt["visit"] = 7
-			trace := body["trace"].([]any)
-			persist := trace[4].(map[string]any)
-			persist["ordinal"] = 7
-			trace = append(trace[:4], map[string]any{"ordinal": 5, "stepId": 85, "kind": "action"}, map[string]any{"ordinal": 6, "stepId": 86, "kind": "judgement"})
-			if state == "stored" {
-				trace = append(trace, persist)
-			} else {
-				body["output"].(map[string]any)["thought"] = map[string]any{"state": "abstained", "receipt": map[string]any{}}
-			}
-			body["trace"] = trace
-			calls := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; json.NewEncoder(w).Encode(body) }))
-			defer server.Close()
-			result, err := processor.NewThoughtProcess(server.URL, 81, server.Client()).Review(context.Background(), []window.Utterance{{ID: "121", Speaker: "Lena", Text: "new cue"}}, nil, "delivered")
-			if err != nil || calls != 1 || result.State != state || result.ModelCalls != 4 || result.Thought == nil || (state == "stored") != (result.Thought.Receipt != nil) {
-				t.Fatalf("conditional comparison failed: state=%s calls=%d err=%v", result.State, calls, err)
-			}
-		})
+func TestReview_ThreeJudgementAbstention_RequiresNoWriteReceipt(t *testing.T) {
+	body := thoughtResponse("stored")
+	body["trace"] = body["trace"].([]any)[:4]
+	body["output"].(map[string]any)["thought"] = map[string]any{"state": "abstained", "receipt": map[string]any{}}
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; json.NewEncoder(w).Encode(body) }))
+	defer server.Close()
+	result, err := processor.NewThoughtProcess(server.URL, 81, server.Client()).Review(context.Background(), []window.Utterance{{ID: "121", Speaker: "Lena", Text: "reaction"}}, nil, "delivered")
+	if err != nil || calls != 1 || result.ModelCalls != 3 || result.State != "abstained" || result.NoteID != 0 || result.Thought.Receipt != nil {
+		t.Fatalf("three judgement abstention failed: state=%s calls=%d err=%v", result.State, calls, err)
 	}
 }
 
 func TestReview_ExcessThoughtJudgements_RejectsUnboundedCompanion(t *testing.T) {
 	body := thoughtResponse("stored")
-	body["trace"] = append(body["trace"].([]any), map[string]any{"ordinal": 6, "stepId": 95, "kind": "judgement"}, map[string]any{"ordinal": 7, "stepId": 96, "kind": "judgement"})
+	body["trace"] = append(body["trace"].([]any), map[string]any{"ordinal": 6, "stepId": 95, "kind": "judgement"})
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; json.NewEncoder(w).Encode(body) }))
 	defer server.Close()
