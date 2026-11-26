@@ -29,7 +29,7 @@ func TestMemoryJobFreezesTrustedUtterancesAndHistoryBeforeDispatch(t *testing.T)
 	c.memoryJobs = make(chan memoryJob, 1)
 	batch := window.Batch{
 		Input:   "Sora: I keep locally adapted seeds.",
-		Lines:   []window.Utterance{{Speaker: "Sora", Text: "I keep locally adapted seeds."}},
+		Lines:   []window.Utterance{{ID: "501", Speaker: "Sora", Text: "I keep locally adapted seeds."}},
 		History: []window.Exchange{{Input: "Mara: earlier source", Reply: "excluded reply"}},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -38,9 +38,15 @@ func TestMemoryJobFreezesTrustedUtterancesAndHistoryBeforeDispatch(t *testing.T)
 	if len(c.memoryJobs) != 1 {
 		t.Fatal("review was not enqueued")
 	}
+	batch.Lines[0].ID = "999"
 	batch.Lines[0].Speaker = "changed speaker after offer"
 	batch.Lines[0].Text = "changed text after offer"
 	batch.History[0].Input = "changed history after offer"
+	frozen := <-c.memoryJobs
+	if frozen.lines[0].ID != "501" || frozen.reply != "delivered reply" {
+		t.Fatal("trusted source ID or delivered reply was not frozen")
+	}
+	c.memoryJobs <- frozen
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

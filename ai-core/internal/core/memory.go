@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/telmengedar/gangolf/ai-core/internal/processor"
@@ -10,7 +11,7 @@ import (
 
 // MemoryReviewer privately considers a completed, delivered interaction.
 type MemoryReviewer interface {
-	Review(context.Context, []window.Utterance, []window.Exchange) (processor.MemoryResult, error)
+	Review(context.Context, []window.Utterance, []window.Exchange, string) (processor.MemoryResult, error)
 }
 
 type memoryJob struct {
@@ -47,16 +48,27 @@ func (c *Core) reviewMemory(ctx context.Context) {
 			}
 			started := time.Now()
 			reviewCtx, cancel := context.WithTimeout(ctx, processor.MemoryReviewTimeout)
-			result, err := c.memoryReviewer.Review(reviewCtx, job.lines, job.history)
+			result, err := c.memoryReviewer.Review(reviewCtx, job.lines, job.history, job.reply)
 			cancel()
 			state := result.State
 			if err != nil {
 				state = "unknown"
 			}
-			c.log.Info("memory review finished", "service", job.key.Service, "channel", job.key.Channel,
-				"outcome", state, "noteID", result.NoteID, "modelCalls", result.ModelCalls,
-				"inputBytes", len(job.input), "exchanges", len(job.history), "replyBytes", len(job.reply),
-				"tookMs", time.Since(started).Milliseconds())
+			fields := []any{"service", job.key.Service, "channel", job.key.Channel, "outcome", state, "noteID", result.NoteID, "modelCalls", result.ModelCalls, "inputBytes", len(job.input), "exchanges", len(job.history), "replyBytes", len(job.reply), "tookMs", time.Since(started).Milliseconds()}
+			if result.Thought != nil {
+				info := result.Thought
+				receiptHash := ""
+				if info.Receipt != nil {
+					receiptHash = info.Receipt.ContentHash
+				}
+				var failure *processor.ProcessError
+				if errors.As(err, &failure) {
+					fields = append(fields, "errorCode", failure.Code, "httpStatus", failure.Status)
+				}
+				fields = append(fields, "processID", info.ProcessID, "processHash", info.ProcessHash, "inputHash", info.InputHash, "sourceIDs", info.SourceIDs, "contentHash", receiptHash, "repairIDs", info.RepairIDs)
+			}
+			c.log.Info("memory review finished", fields...)
+
 		}
 	}
 }

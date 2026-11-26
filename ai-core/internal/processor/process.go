@@ -59,6 +59,14 @@ func (c *ProcessClient) Run(ctx context.Context, input string, history []window.
 	if c.processID <= 0 || c.personaID <= 0 {
 		return Result{}, &ProcessError{Code: "invalid_binding"}
 	}
+	status, body, err := c.requestProcess(ctx, map[string]any{"message": input, "history": workflowHistory(history), "persona": c.personaID})
+	if err != nil {
+		return Result{}, err
+	}
+	return c.decode(status, body)
+}
+
+func workflowHistory(history []window.Exchange) []workflowExchange {
 	if len(history) > 4 {
 		history = history[len(history)-4:]
 	}
@@ -69,32 +77,38 @@ func (c *ProcessClient) Run(ctx context.Context, input string, history []window.
 			exchanges[i].Reply = &workflowReply{Role: "assistant", Author: "Gangolf", Text: item.Reply}
 		}
 	}
+	return exchanges
+}
+
+func (c *ProcessClient) requestProcess(ctx context.Context, arguments map[string]any) (int, []byte, error) {
 	encoded, err := json.Marshal(map[string]any{
 		"processId": c.processID,
-		"arguments": map[string]any{"message": input, "history": exchanges, "persona": c.personaID},
+		"arguments": arguments,
 	})
 	if err != nil {
-		return Result{}, &ProcessError{Code: "invalid_request", Cause: err}
+		return 0, nil, &ProcessError{Code: "invalid_request", Cause: err}
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/process-runs", bytes.NewReader(encoded))
 	if err != nil {
-		return Result{}, &ProcessError{Code: "invalid_request", Cause: err}
+		return 0, nil, &ProcessError{Code: "invalid_request", Cause: err}
 	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := c.http.Do(request)
 	if err != nil {
-		return Result{}, &ProcessError{Code: "transport", Cause: err}
+		return 0, nil, &ProcessError{Code: "transport", Cause: err}
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
-		return Result{}, &ProcessError{Code: "read_response", Status: response.StatusCode, Cause: err}
+		return 0, nil, &ProcessError{Code: "read_response", Status: response.StatusCode, Cause: err}
 	}
-	return c.decode(response.StatusCode, body)
+	return response.StatusCode, body, nil
 }
 
-func (c *ProcessClient) decode(status int, body []byte) (Result, error) {
-	invalid := func(code string) (Result, error) { return Result{}, &ProcessError{Code: code, Status: status} }
+func (c *ProcessClient) envelope(status int, body []byte) (map[string]json.RawMessage, error) {
+	invalid := func(code string) (map[string]json.RawMessage, error) {
+		return nil, &ProcessError{Code: code, Status: status}
+	}
 	envelope, err := processObject(body)
 	if err != nil {
 		return invalid("invalid_response")
@@ -130,6 +144,15 @@ func (c *ProcessClient) decode(status int, body []byte) (Result, error) {
 	if _, err := hex.DecodeString(hash); err != nil {
 		return invalid("invalid_response")
 	}
+	return envelope, nil
+}
+
+func (c *ProcessClient) decode(status int, body []byte) (Result, error) {
+	envelope, err := c.envelope(status, body)
+	if err != nil {
+		return Result{}, err
+	}
+	invalid := func(code string) (Result, error) { return Result{}, &ProcessError{Code: code, Status: status} }
 	output, err := processObject(envelope["output"])
 	var reply *string
 	var silent *bool

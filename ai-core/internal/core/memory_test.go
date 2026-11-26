@@ -22,19 +22,20 @@ type reviewCall struct {
 	history  []window.Exchange
 	lines    []window.Utterance
 	deadline time.Time
+	reply    string
 }
 type fakeReviewer struct {
 	calls  chan reviewCall
 	review func(context.Context) (processor.MemoryResult, error)
 }
 
-func (f *fakeReviewer) Review(ctx context.Context, lines []window.Utterance, history []window.Exchange) (processor.MemoryResult, error) {
+func (f *fakeReviewer) Review(ctx context.Context, lines []window.Utterance, history []window.Exchange, reply string) (processor.MemoryResult, error) {
 	deadline, _ := ctx.Deadline()
 	var input []string
 	for _, line := range lines {
 		input = append(input, line.Speaker+": "+line.Text)
 	}
-	f.calls <- reviewCall{strings.Join(input, "\n"), history, lines, deadline}
+	f.calls <- reviewCall{strings.Join(input, "\n"), history, lines, deadline, reply}
 	if f.review != nil {
 		return f.review(ctx)
 	}
@@ -91,6 +92,9 @@ func TestMemoryReviewUsesTrustedInputHistoryAfterFinalSanitizedRetry(t *testing.
 	}
 	if !reflect.DeepEqual(call.history, r.runner.calls[0].history) {
 		t.Fatalf("review history=%+v, chat=%+v", call.history, r.runner.calls[0].history)
+	}
+	if call.reply != "final accepted answer" {
+		t.Fatal("delivered reply missing from review snapshot")
 	}
 	if len(r.messages.posts) != 1 || r.messages.posts[0].text != "final accepted answer" {
 		t.Fatalf("posts=%+v", r.messages.posts)

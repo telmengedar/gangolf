@@ -17,6 +17,7 @@ type MemoryResult struct {
 	State      string
 	NoteID     int64
 	ModelCalls int
+	Thought    *ThoughtMetadata
 }
 
 type memoryResponse struct {
@@ -30,7 +31,7 @@ type noteDecision struct {
 }
 
 // Review submits speaker evidence and returns only the typed memory receipt.
-func (c *Client) Review(ctx context.Context, lines []window.Utterance, history []window.Exchange) (MemoryResult, error) {
+func (c *Client) Review(ctx context.Context, lines []window.Utterance, history []window.Exchange, _ string) (MemoryResult, error) {
 	source, err := transcriptEvidence(lines, history)
 	if err != nil {
 		return MemoryResult{}, err
